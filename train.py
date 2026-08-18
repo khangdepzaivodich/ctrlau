@@ -96,13 +96,24 @@ def evaluate(model, dataloader, device):
     return avg_f1
 
 
+import argparse
+
 def main():
+    parser = argparse.ArgumentParser(description="Train CtrlAU Model")
+    parser.add_argument(
+        "--data_root", 
+        type=str, 
+        default=os.path.join(os.path.dirname(__file__), "DISFA_Data"),
+        help="Path to the DISFA dataset root folder containing 'img' and 'ActionUnit_Labels'"
+    )
+    args = parser.parse_args()
+
     cfg = ModelConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Dataset
-    data_root = os.path.join(os.path.dirname(__file__), "DISFA_Data")
+    data_root = args.data_root
     dataset = DISFADataset(data_root=data_root)
     print(f"Total samples: {len(dataset)}")
     
