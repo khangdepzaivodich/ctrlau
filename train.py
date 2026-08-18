@@ -106,6 +106,12 @@ def main():
         default=os.path.join(os.path.dirname(__file__), "DISFA_Data"),
         help="Path to the DISFA dataset root folder containing 'img' and 'ActionUnit_Labels'"
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="",
+        help="Path to a checkpoint (.pth file) to resume training from"
+    )
     args = parser.parse_args()
 
     cfg = ModelConfig()
@@ -136,6 +142,14 @@ def main():
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print(f"Loading checkpoint from {args.resume}...")
+            model.load_state_dict(torch.load(args.resume, map_location=device))
+            print("Checkpoint loaded successfully.")
+        else:
+            print(f"Warning: Checkpoint file '{args.resume}' not found. Starting from scratch.")
+
     # Optimizer
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -163,11 +177,16 @@ def main():
         
         scheduler.step()
         
+        # Save checkpoint for this specific epoch
+        epoch_ckpt_path = f"ctrlau_epoch_{epoch}.pth"
+        torch.save(model.state_dict(), epoch_ckpt_path)
+        print(f"  -> Saved epoch checkpoint: {epoch_ckpt_path}")
+
         # Save best model
         if avg_f1 > best_f1:
             best_f1 = avg_f1
             torch.save(model.state_dict(), "ctrlau_best.pth")
-            print(f"  -> New best F1: {best_f1:.4f}, model saved.")
+            print(f"  -> New best F1: {best_f1:.4f}, 'ctrlau_best.pth' updated.")
     
     print(f"\nTraining complete. Best F1: {best_f1:.4f}")
 
