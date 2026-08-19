@@ -98,14 +98,21 @@ class CtrlAUModel(nn.Module):
         )
         
         # ---- Loss modules ----
+        from losses import HSICDisentanglementLoss, ContrastiveLoss, DAGLoss, ViolationLoss, CounterfactualLoss, FocalLoss
         self.hsic_loss = HSICDisentanglementLoss(num_aus=NUM_AUS)
         self.contrastive_loss = ContrastiveLoss(temperature=0.07)
         self.dag_loss = DAGLoss(num_nodes=NUM_AUS)
         self.violation_loss = ViolationLoss()
         self.cf_loss = CounterfactualLoss()
         
-        # ---- AU detection loss ----
-        self.au_bce_loss = nn.BCEWithLogitsLoss()
+        # ---- AU detection loss (Focal Loss with Dataset Pos Weights) ----
+        # Pos weights calculated from DISFA dataset to penalize rare classes heavily
+        # [AU1, AU2, AU4, AU5, AU6, AU9, AU12, AU15, AU17, AU20, AU25, AU26]
+        au_pos_weights = torch.tensor([
+            19.11, 22.18, 5.56, 112.75, 11.67, 22.90, 
+            6.76, 47.77, 18.86, 43.48, 2.61, 10.34
+        ])
+        self.au_bce_loss = FocalLoss(gamma=2.0, pos_weight=au_pos_weights)
         
         # ---- Emotion weak supervision loss ----
         self.emotion_bce_loss = nn.BCELoss()

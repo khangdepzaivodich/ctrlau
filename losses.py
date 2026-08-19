@@ -12,6 +12,35 @@ import torch.nn.functional as F
 
 
 # ============================================================
+# AU Classification: Asymmetric / Weighted Focal Loss
+# ============================================================
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for Multi-label classification with optional positive class weighting.
+    Down-weights easy examples and focuses the gradients on hard examples.
+    """
+    def __init__(self, gamma=2.0, pos_weight=None):
+        super().__init__()
+        self.gamma = gamma
+        # We use PyTorch's built-in pos_weight to handle the raw data imbalance,
+        # and Focal Loss to dynamically handle prediction confidence.
+        self.bce_with_logits = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="none")
+
+    def forward(self, inputs, targets):
+        # Compute standard BCE loss (per element, unreduced)
+        bce_loss = self.bce_with_logits(inputs, targets)
+        
+        # Calculate pt (probability of true class) using the trick: pt = exp(-BCE)
+        pt = torch.exp(-bce_loss)
+        
+        # Focal Loss formula: (1 - pt)^gamma * BCE
+        focal_loss = ((1 - pt) ** self.gamma) * bce_loss
+        
+        return focal_loss.mean()
+
+
+# ============================================================
 # HSIC (Hilbert-Schmidt Independence Criterion)
 # ============================================================
 
