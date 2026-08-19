@@ -112,21 +112,43 @@ def main():
         default="",
         help="Path to a checkpoint (.pth file) to resume training from"
     )
+    parser.add_argument(
+        "--fold",
+        type=int,
+        default=1,
+        choices=[1, 2, 3],
+        help="Which fold to use for validation (1, 2, or 3). The other two will be used for training."
+    )
     args = parser.parse_args()
 
     cfg = ModelConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Dataset
-    data_root = args.data_root
-    dataset = DISFADataset(data_root=data_root)
-    print(f"Total samples: {len(dataset)}")
+    # Standard DISFA 3-Fold Cross Validation Subject Splits
+    group_1 = ["SN001", "SN002", "SN003", "SN004", "SN005", "SN006", "SN007", "SN008", "SN009"]
+    group_2 = ["SN010", "SN011", "SN012", "SN013", "SN016", "SN017", "SN018", "SN021", "SN023"]
+    group_3 = ["SN024", "SN025", "SN026", "SN027", "SN028", "SN029", "SN030", "SN031", "SN032"]
     
-    # Train/Val split (80/20)
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    if args.fold == 1:
+        train_subjects = group_1 + group_2
+        val_subjects = group_3
+    elif args.fold == 2:
+        train_subjects = group_1 + group_3
+        val_subjects = group_2
+    else:  # fold 3
+        train_subjects = group_2 + group_3
+        val_subjects = group_1
+        
+    print(f"--- FOLD {args.fold} SPLIT ---")
+    print(f"Train subjects ({len(train_subjects)}): {train_subjects}")
+    print(f"Val subjects ({len(val_subjects)}): {val_subjects}")
+    
+    train_dataset = DISFADataset(data_root=args.data_root, subjects=train_subjects)
+    val_dataset = DISFADataset(data_root=args.data_root, subjects=val_subjects)
+    
+    print(f"Train samples: {len(train_dataset)}")
+    print(f"Val samples: {len(val_dataset)}")
     
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.batch_size,
