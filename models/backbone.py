@@ -9,14 +9,14 @@ import torchvision.models as models
 
 class VisualBackbone(nn.Module):
     """
-    ResNet50 backbone that outputs a global image feature z_img.
+    ResNet18 backbone that outputs a global image feature z_img.
     The final classification layer is removed.
     """
     
-    def __init__(self, feat_dim=2048, pretrained=True):
+    def __init__(self, feat_dim=512, pretrained=True):
         super().__init__()
-        resnet = models.resnet50(
-            weights=models.ResNet50_Weights.DEFAULT if pretrained else None
+        resnet = models.resnet18(
+            weights=models.ResNet18_Weights.DEFAULT if pretrained else None
         )
         # Remove the final FC layer
         self.features = nn.Sequential(*list(resnet.children())[:-1])  # up to avgpool

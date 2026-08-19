@@ -91,8 +91,8 @@ class ModelConfig:
     img_size = 224
     
     # Backbone
-    backbone = "resnet50"
-    backbone_feat_dim = 2048       # ResNet50 final feature dim
+    backbone = "resnet18"
+    backbone_feat_dim = 512        # ResNet18 final feature dim
     
     # Embedding dims
     au_embed_dim = 256             # per-AU embedding dimension
@@ -127,6 +127,6 @@ class ModelConfig:
     # Training
     lr = 1e-4
     weight_decay = 1e-5
-    batch_size = 16
+    batch_size = 64
     num_epochs = 50
     clip_model_name = "openai/clip-vit-base-patch32"
