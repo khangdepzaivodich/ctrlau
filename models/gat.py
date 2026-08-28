@@ -37,7 +37,7 @@ class AUGraphModule(nn.Module):
             out_dim = gat_hidden_dim // gat_num_heads
             self.au_au_gat_layers.append(
                 GATConv(
-                    in_channels=in_dim,
+                    in_channels=in_dim,         
                     out_channels=out_dim,
                     heads=gat_num_heads,
                     dropout=dropout,

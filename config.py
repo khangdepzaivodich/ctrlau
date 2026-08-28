@@ -132,7 +132,7 @@ class ModelConfig:
     
     # Training
     lr = 1e-4
-    weight_decay = 1e-5
+    weight_decay = 1e-4
     batch_size = 64
     num_epochs = 20
     clip_model_name = "openai/clip-vit-base-patch32"
