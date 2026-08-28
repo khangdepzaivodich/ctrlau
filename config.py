@@ -117,16 +117,22 @@ class ModelConfig:
     lambda_ib = 0.1                # information bottleneck (minimize dep with zimg)
     lambda_align = 0.1             # align AU repr with labels
     lambda_decorr = 0.1            # decorrelate different AU reprs
-    lambda_contrastive = 0.1       # contrastive text-visual alignment
-    lambda_dag = 0.1               # DAG constraint
-    lambda_violation = 0.1         # rule violation loss
+    lambda_contrastive = 0.5       # visual-text alignment
+    lambda_dag = 0.1               # DAG constraint on AU-AU graph
+    lambda_causal_au = 0.1         # Causal structural rule on AU-AU graph
+    lambda_causal_exp = 0.1        # Causal structural rule on AU-Exp graph
+    lambda_facs_au = 0.1           # FACS rules on AU-AU graph (XOR, subsume)
+    lambda_facs_exp = 0.1          # FACS emotion rules on AU-Exp graph loss
     lambda_cf_important = 0.1      # counterfactual important perturbation
     lambda_cf_unimportant = 0.1    # counterfactual unimportant perturbation
     lambda_emotion = 0.1           # emotion weak supervision
+    lambda_au_au = 1.0             # intermediate AU-AU graph loss
+    lambda_graph_au = 1.0          # Graph AU classification loss
+    lambda_graph_emo = 1.0         # Graph Emotion classification loss
     
     # Training
     lr = 1e-4
     weight_decay = 1e-5
     batch_size = 64
-    num_epochs = 50
+    num_epochs = 20
     clip_model_name = "openai/clip-vit-base-patch32"

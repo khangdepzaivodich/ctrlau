@@ -12,6 +12,28 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import EMOTION_AU_RULES_IDX, EMOTIONS, NUM_EMOTIONS
 
+class Conv1DExtractor(nn.Module):
+    """
+    1D Convolutional Extractor that scans across the 49 spatial patches of the face.
+    Preserves spatial layout before finally pooling into a specific embedding.
+    """
+    def __init__(self, in_channels, embed_dim=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(in_channels, 512, kernel_size=3, padding=1),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(512, embed_dim, kernel_size=3, padding=1),
+            nn.BatchNorm1d(embed_dim),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool1d(1)
+        )
+        
+    def forward(self, x):
+        # x is (B, in_channels, sequence_length)
+        z = self.net(x)        # (B, embed_dim, 1)
+        return z.squeeze(2)    # (B, embed_dim)
+
 
 class AUHead(nn.Module):
     """
@@ -26,20 +48,9 @@ class AUHead(nn.Module):
         self.num_aus = num_aus
         self.au_embed_dim = au_embed_dim
         
-        # Shared feature transform
-        self.shared_fc = nn.Sequential(
-            nn.Linear(backbone_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-        )
-        
-        # Per-AU embedding heads
+        # Per-AU embedding heads (1D CNNs)
         self.au_embed_heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(512, au_embed_dim),
-                nn.BatchNorm1d(au_embed_dim),
-                nn.ReLU(inplace=True),
-            )
+            Conv1DExtractor(backbone_dim, au_embed_dim)
             for _ in range(num_aus)
         ])
         
@@ -52,19 +63,18 @@ class AUHead(nn.Module):
     def forward(self, z_img):
         """
         Args:
-            z_img: (B, D_backbone)
+            z_img: (B, D_backbone, D_patches)
         Returns:
             au_embeddings: list of (B, au_embed_dim) tensors
             au_logits: (B, N_AU) raw logits
             au_probs: (B, N_AU) sigmoid probabilities
         """
-        shared = self.shared_fc(z_img)  # (B, 512)
         
         au_embeddings = []
         au_logits_list = []
         
         for i in range(self.num_aus):
-            emb = self.au_embed_heads[i](shared)      # (B, au_embed_dim)
+            emb = self.au_embed_heads[i](z_img)         # (B, au_embed_dim)
             logit = self.au_classifiers[i](emb)         # (B, 1)
             au_embeddings.append(emb)
             au_logits_list.append(logit)
@@ -90,18 +100,17 @@ class EmotionHead(nn.Module):
         super().__init__()
         self.num_emotions = num_emotions
         
-        # Learnable emotion embedding from visual features
-        self.emotion_fc = nn.Sequential(
-            nn.Linear(backbone_dim, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            nn.Linear(512, emotion_embed_dim),
-            nn.BatchNorm1d(emotion_embed_dim),
-            nn.ReLU(inplace=True),
-        )
+        # Learnable emotion embedding heads (1D CNNs)
+        self.emotion_embed_heads = nn.ModuleList([
+            Conv1DExtractor(backbone_dim, emotion_embed_dim)
+            for _ in range(num_emotions)
+        ])
         
-        # Emotion classifier
-        self.emotion_classifier = nn.Linear(emotion_embed_dim, num_emotions)
+        # Emotion classifiers
+        self.emotion_classifiers = nn.ModuleList([
+            nn.Linear(emotion_embed_dim, 1)
+            for _ in range(num_emotions)
+        ])
     
     def compute_fuzzy_emotions(self, au_probs):
         """
@@ -143,19 +152,26 @@ class EmotionHead(nn.Module):
     def forward(self, z_img, au_probs):
         """
         Args:
-            z_img: (B, D_backbone) image features
+            z_img: (B, D_backbone, D_patches) image features
             au_probs: (B, N_AU) AU probabilities from AU head
         Returns:
-            emotion_embed: (B, emotion_embed_dim)
+            emotion_embed_list: list of (B, emotion_embed_dim) tensors
             emotion_logits: (B, N_EMOTIONS)
             emotion_probs: (B, N_EMOTIONS)
-            emotion_pseudo: (B, N_EMOTIONS) fuzzy logic pseudo-labels
+            emotion_pseudo: (B, N_EMOTIONS) fuzzy labels
         """
-        emotion_embed = self.emotion_fc(z_img)
-        emotion_logits = self.emotion_classifier(emotion_embed)
-        emotion_probs = torch.sigmoid(emotion_logits)
-        
-        # Compute pseudo-labels from AU predictions
         emotion_pseudo = self.compute_fuzzy_emotions(au_probs)
         
-        return emotion_embed, emotion_logits, emotion_probs, emotion_pseudo
+        emotion_embed_list = []
+        emotion_logits_list = []
+        
+        for i in range(self.num_emotions):
+            emb = self.emotion_embed_heads[i](z_img)
+            logit = self.emotion_classifiers[i](emb)
+            emotion_embed_list.append(emb)
+            emotion_logits_list.append(logit)
+            
+        emotion_logits = torch.cat(emotion_logits_list, dim=1)  # (B, N_EMO)
+        emotion_probs = torch.sigmoid(emotion_logits)
+        
+        return emotion_embed_list, emotion_logits, emotion_probs, emotion_pseudo

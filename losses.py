@@ -277,6 +277,46 @@ class ViolationLoss(nn.Module):
         return loss
 
 
+class FACSEmotionViolationLoss(nn.Module):
+    """
+    Computes strict FACS-based hypergraph violations for AU-Expression logic.
+    Instead of pairwise edges, evaluates strict AND gates using Fuzzy Logic (T-norm).
+    Formula: Prob(A) * Prob(B) * ... * (1 - Prob(Emotion))
+    """
+    def __init__(self):
+        super().__init__()
+        
+    def forward(self, au_probs, emotion_probs):
+        """
+        Args:
+            au_probs: (B, 12) AU probabilities
+            emotion_probs: (B, 7) Emotion probabilities
+        Returns:
+            violation loss scalar
+        """
+        # Happiness: AU6(4) * AU12(6) -> Happy(0)
+        v_happy = au_probs[:, 4] * au_probs[:, 6] * (1.0 - emotion_probs[:, 0])
+        
+        # Sadness: AU1(0) * AU4(2) * AU15(7) -> Sad(1)
+        v_sad = au_probs[:, 0] * au_probs[:, 2] * au_probs[:, 7] * (1.0 - emotion_probs[:, 1])
+        
+        # Surprise: AU1(0) * AU2(1) * AU5(3) * AU26(11) -> Surprise(2)
+        v_sur = au_probs[:, 0] * au_probs[:, 1] * au_probs[:, 3] * au_probs[:, 11] * (1.0 - emotion_probs[:, 2])
+        
+        # Fear: AU1(0) * AU2(1) * AU4(2) * AU5(3) * AU20(9) * AU26(11) -> Fear(3)
+        v_fear = au_probs[:, 0] * au_probs[:, 1] * au_probs[:, 2] * au_probs[:, 3] * au_probs[:, 9] * au_probs[:, 11] * (1.0 - emotion_probs[:, 3])
+        
+        # Disgust: AU9(5) * AU15(7) -> Disgust(4)
+        v_dis = au_probs[:, 5] * au_probs[:, 7] * (1.0 - emotion_probs[:, 4])
+        
+        # Anger: AU4(2) * AU5(3) -> Anger(5)
+        v_ang = au_probs[:, 2] * au_probs[:, 3] * (1.0 - emotion_probs[:, 5])
+        
+        total_violation = v_happy.mean() + v_sad.mean() + v_sur.mean() + v_fear.mean() + v_dis.mean() + v_ang.mean()
+        
+        return total_violation
+
+
 # ============================================================
 # Counterfactual Intervention Losses
 # ============================================================
@@ -318,3 +358,58 @@ class CounterfactualLoss(nn.Module):
         loss_unimportant = F.mse_loss(pred_unimportant_perturbed, pred_original)
         
         return loss_important, loss_unimportant
+
+
+# ============================================================
+# FACS AU-AU Rule Violation Loss
+# ============================================================
+
+class FACSAUViolationLoss(nn.Module):
+    """
+    Computes violation of strict FACS anatomical rules between AUs using Fuzzy Logic (T-norms).
+    Rules extracted strictly from facs_au_rules.md for the DISFA dataset.
+    (AUs: 1, 2, 4, 5, 6, 9, 12, 15, 17, 20, 25, 26).
+    
+    AU Indices in DISFA:
+    AU4  : index 2
+    AU6  : index 4
+    AU9  : index 5
+    AU25 : index 10
+    AU26 : index 11
+    """
+    
+    def __init__(self):
+        super().__init__()
+        
+    def forward(self, au_probs):
+        """
+        Args:
+            au_probs: (B, N_AU) predicted AU probabilities
+        Returns:
+            violation_loss: scalar sum of all rule violations
+        """
+        device = au_probs.device
+        loss = torch.tensor(0.0, device=device)
+        
+        # Extract relevant AUs
+        p_au4 = au_probs[:, 2]
+        p_au6 = au_probs[:, 4]
+        p_au9 = au_probs[:, 5]
+        p_au25 = au_probs[:, 10]
+        p_au26 = au_probs[:, 11]
+        
+        # 1. Mutually Exclusive Rules (XOR)
+        # Rule: AU 25 XOR AU 26
+        # Fuzzy violation: p(AU25) AND p(AU26) should be 0
+        loss += (p_au25 * p_au26).mean()
+        
+        # 2. Subsuming Rules
+        # Rule: AU 9 subsumes AU 4 (If AU9 is active, AU4 is inherently active/subsumed)
+        # Fuzzy violation: p(AU9) AND NOT p(AU4) should be 0
+        loss += (p_au9 * (1.0 - p_au4)).mean()
+        
+        # Rule: AU 9 subsumes AU 6 (If AU9 is active, AU6 is inherently active/subsumed)
+        # Fuzzy violation: p(AU9) AND NOT p(AU6) should be 0
+        loss += (p_au9 * (1.0 - p_au6)).mean()
+        
+        return loss

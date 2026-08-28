@@ -15,7 +15,8 @@ from config import (
 )
 from losses import (
     HSICDisentanglementLoss, ContrastiveLoss, DAGLoss,
-    ViolationLoss, CounterfactualLoss,
+    ViolationLoss, FACSEmotionViolationLoss, CounterfactualLoss, FocalLoss,
+    FACSAUViolationLoss
 )
 from .backbone import VisualBackbone
 from .text_encoder import TextEncoder
@@ -97,12 +98,25 @@ class CtrlAUModel(nn.Module):
             nn.Linear(cfg.shared_embed_dim, cfg.shared_embed_dim),
         )
         
+        # ---- Graph Classifiers ----
+        # Takes the updated embeddings from GAT and outputs graph-based predictions
+        self.au_au_classifiers = nn.ModuleList([
+            nn.Linear(cfg.au_embed_dim, 1) for _ in range(NUM_AUS)
+        ])
+        self.graph_au_classifiers = nn.ModuleList([
+            nn.Linear(cfg.au_embed_dim, 1) for _ in range(NUM_AUS)
+        ])
+        self.graph_emo_classifiers = nn.ModuleList([
+            nn.Linear(cfg.au_embed_dim, 1) for _ in range(NUM_EMOTIONS)
+        ])
+        
         # ---- Loss modules ----
-        from losses import HSICDisentanglementLoss, ContrastiveLoss, DAGLoss, ViolationLoss, CounterfactualLoss, FocalLoss
         self.hsic_loss = HSICDisentanglementLoss(num_aus=NUM_AUS)
         self.contrastive_loss = ContrastiveLoss(temperature=0.07)
         self.dag_loss = DAGLoss(num_nodes=NUM_AUS)
         self.violation_loss = ViolationLoss()
+        self.facs_emotion_violation_loss = FACSEmotionViolationLoss()
+        self.facs_au_violation_loss = FACSAUViolationLoss()
         self.cf_loss = CounterfactualLoss()
         
         # ---- AU detection loss (Focal Loss with Dataset Pos Weights) ----
@@ -145,10 +159,10 @@ class CtrlAUModel(nn.Module):
         
         if mode == "important":
             # Perturb where mask = 1
-            perturbed_z = z_img + noise * mask_vector.unsqueeze(0)
+            perturbed_z = z_img + noise * mask_vector.unsqueeze(0).unsqueeze(2)
         else:
             # Perturb where mask = 0
-            perturbed_z = z_img + noise * (1.0 - mask_vector.unsqueeze(0))
+            perturbed_z = z_img + noise * (1.0 - mask_vector.unsqueeze(0).unsqueeze(2))
         
         return perturbed_z
     
@@ -181,12 +195,13 @@ class CtrlAUModel(nn.Module):
         # ============================================================
         # 3. Emotion Head (weak supervision via fuzzy logic)
         # ============================================================
-        emotion_embed, emotion_logits, emotion_probs, emotion_pseudo = self.emotion_head(z_img, au_probs)
+        emotion_embed_list, emotion_logits, emotion_probs, emotion_pseudo = self.emotion_head(z_img, au_probs)
         
         # ============================================================
-        # 4. Stack AU embeddings for graph processing
+        # 4. Stack embeddings for graph processing
         # ============================================================
-        au_emb_stacked = torch.stack(au_embeddings, dim=1)  # (B, N_AU, D)
+        au_emb_stacked = torch.stack(au_embeddings, dim=1)           # (B, N_AU, D)
+        emotion_emb_stacked = torch.stack(emotion_embed_list, dim=1) # (B, N_EMO, D)
         
         # ============================================================
         # 5. GAT: AU-AU graph
@@ -195,11 +210,34 @@ class CtrlAUModel(nn.Module):
         # updated_au: (B, N_AU, D)
         # au_au_adj: (N_AU, N_AU) sigmoid weights
         
+        au_au_logits = []
+        for i in range(NUM_AUS):
+            au_au_logits.append(self.au_au_classifiers[i](updated_au[:, i, :]))
+        au_au_logits = torch.cat(au_au_logits, dim=1) # (B, N_AU)
+        au_au_probs = torch.sigmoid(au_au_logits)
+        
         # ============================================================
         # 6. GAT: AU-Expression graph
         # ============================================================
-        updated_nodes, au_exp_adj = self.graph_module.forward_au_exp(au_emb_stacked, emotion_embed)
+        updated_nodes, au_exp_adj = self.graph_module.forward_au_exp(au_emb_stacked, emotion_emb_stacked)
         # updated_nodes: (B, N_AU + N_EMO, D)
+        
+        # Split updated_nodes back into AU and Emo
+        updated_au_final = updated_nodes[:, :NUM_AUS, :]  # (B, N_AU, D)
+        updated_emo_final = updated_nodes[:, NUM_AUS:, :] # (B, N_EMO, D)
+        
+        # Apply Graph Classifiers
+        graph_au_logits = []
+        for i in range(NUM_AUS):
+            graph_au_logits.append(self.graph_au_classifiers[i](updated_au_final[:, i, :]))
+        graph_au_logits = torch.cat(graph_au_logits, dim=1) # (B, N_AU)
+        graph_au_probs = torch.sigmoid(graph_au_logits)
+        
+        graph_emo_logits = []
+        for i in range(NUM_EMOTIONS): # 7 emotions
+            graph_emo_logits.append(self.graph_emo_classifiers[i](updated_emo_final[:, i, :]))
+        graph_emo_logits = torch.cat(graph_emo_logits, dim=1) # (B, N_EMO)
+        graph_emo_probs = torch.sigmoid(graph_emo_logits)
         
         # ============================================================
         # 7. Masks from graphs
@@ -218,10 +256,16 @@ class CtrlAUModel(nn.Module):
             losses["loss_au"] = loss_au
             
             # --- HSIC disentanglement ---
-            l_ib, l_align, l_decorr = self.hsic_loss(au_embeddings, z_img, au_labels)
+            # Pool the spatial dimension (dim=2) of z_img for global representation
+            z_img_global = z_img.mean(dim=2)
+            l_ib, l_align, l_decorr = self.hsic_loss(au_embeddings, z_img_global, au_labels)
             losses["loss_ib"] = l_ib
             losses["loss_align"] = l_align
             losses["loss_decorr"] = l_decorr
+            
+            # --- AU-AU graph loss ---
+            loss_au_au = self.au_bce_loss(au_au_logits, au_labels)
+            losses["loss_au_au"] = loss_au_au
             
             # --- Contrastive loss (text-visual alignment) ---
             text_emb = self._get_text_embeddings()  # (N_AU, text_dim)
@@ -239,23 +283,46 @@ class CtrlAUModel(nn.Module):
             loss_dag = self.dag_loss(au_au_adj)
             losses["loss_dag"] = loss_dag
             
-            # --- Violation loss ---
-            loss_violation = self.violation_loss(
+            # --- Violation loss (Symmetrical Causal + FACS for both graphs) ---
+            # 1. AU-AU Causal Discovery Violation
+            loss_causal_au = self.violation_loss(
                 au_probs, au_au_adj, au_au_pol_mask, au_au_imp_mask
             )
-            losses["loss_violation"] = loss_violation
+            losses["loss_causal_au"] = loss_causal_au
+            
+            # 2. AU-AU FACS Violation (Mutually Exclusive / Subsuming)
+            loss_facs_au = self.facs_au_violation_loss(au_au_probs)
+            losses["loss_facs_au"] = loss_facs_au
+            
+            # 3. AU-Expression Causal Discovery Violation
+            loss_causal_exp = self.violation_loss(
+                torch.cat([au_probs, emotion_probs], dim=1), au_exp_adj, au_exp_pol_mask, au_exp_imp_mask
+            )
+            losses["loss_causal_exp"] = loss_causal_exp
+            
+            # 4. AU-Expression FACS Hypergraph Violation
+            loss_facs_exp = self.facs_emotion_violation_loss(graph_au_probs, graph_emo_probs)
+            losses["loss_facs_exp"] = loss_facs_exp
             
             # --- Emotion weak supervision ---
             # Use fuzzy pseudo-labels as targets for emotion head
             loss_emotion = self.emotion_bce_loss(emotion_probs, emotion_pseudo.detach())
             losses["loss_emotion"] = loss_emotion
             
+            # --- Graph prediction losses ---
+            loss_graph_au = self.au_bce_loss(graph_au_logits, au_labels)
+            losses["loss_graph_au"] = loss_graph_au
+            
+            loss_graph_emo = self.emotion_bce_loss(graph_emo_probs, emotion_pseudo.detach())
+            losses["loss_graph_emo"] = loss_graph_emo
+            
             # --- Counterfactual intervention ---
             # Derive a z_img-level mask from AU importance.
             # Each AU's importance (diagonal of AU-AU importance mask) weights
             # how much that AU's corresponding shared_fc features matter.
             # We create a (D_backbone,) mask by thresholding z_img feature magnitudes.
-            z_img_magnitude = z_img.detach().mean(dim=0).abs()  # (D_backbone,)
+            # Pool over batch (dim=0) and patches (dim=2)
+            z_img_magnitude = z_img.detach().mean(dim=(0, 2)).abs()  # (D_backbone,)
             cf_mask = (z_img_magnitude > z_img_magnitude.median()).float()  # (D_backbone,)
             
             # Important perturbation
@@ -281,20 +348,30 @@ class CtrlAUModel(nn.Module):
                 cfg.lambda_decorr * l_decorr +
                 cfg.lambda_contrastive * loss_contrastive +
                 cfg.lambda_dag * loss_dag +
-                cfg.lambda_violation * loss_violation +
+                cfg.lambda_causal_au * loss_causal_au +
+                cfg.lambda_causal_exp * loss_causal_exp +
+                cfg.lambda_facs_au * loss_facs_au +
+                cfg.lambda_facs_exp * loss_facs_exp +
                 cfg.lambda_emotion * loss_emotion +
+                cfg.lambda_au_au * loss_au_au +
+                cfg.lambda_graph_au * loss_graph_au +
+                cfg.lambda_graph_emo * loss_graph_emo +
                 cfg.lambda_cf_important * loss_cf_imp +
                 cfg.lambda_cf_unimportant * loss_cf_unimp
             )
             losses["total_loss"] = total_loss
         
         return {
+            "au_embeddings": au_embeddings,
             "au_logits": au_logits,
             "au_probs": au_probs,
-            "au_embeddings": au_embeddings,
+            "au_au_probs": au_au_probs,
+            "emotion_embed": emotion_emb_stacked,
+            "emotion_logits": emotion_logits,
             "emotion_probs": emotion_probs,
             "emotion_pseudo": emotion_pseudo,
-            "emotion_embed": emotion_embed,
+            "graph_au_probs": graph_au_probs,
+            "graph_emo_probs": graph_emo_probs,
             "au_au_adj": au_au_adj,
             "au_exp_adj": au_exp_adj,
             "au_au_importance_mask": au_au_imp_mask,

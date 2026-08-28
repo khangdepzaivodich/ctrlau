@@ -129,13 +129,13 @@ class AUGraphModule(nn.Module):
         
         return updated_au, au_au_adj_sigmoid
     
-    def forward_au_exp(self, au_embeddings_stacked, emotion_embed):
+    def forward_au_exp(self, au_embeddings_stacked, emotion_embeddings_stacked):
         """
         Forward pass for AU-Expression graph.
         
         Args:
             au_embeddings_stacked: (B, N_AU, D) AU embeddings
-            emotion_embed: (B, D_emo) emotion embedding
+            emotion_embeddings_stacked: (B, N_EMO, D) emotion embeddings (from 1D CNNs)
         Returns:
             updated_nodes: (B, N_AU + N_EMO, D) updated node embeddings
             au_exp_adj_sigmoid: (N_AU + N_EMO, N_AU + N_EMO) adjacency weights
@@ -143,13 +143,8 @@ class AUGraphModule(nn.Module):
         B, N_AU, D = au_embeddings_stacked.shape
         device = au_embeddings_stacked.device
         
-        # Expand emotion embedding to match AU embedding dim if needed
-        # emotion_embed: (B, D_emo), we need (B, N_EMO, D)
-        # Replicate emotion embedding for each emotion node
-        emo_expanded = emotion_embed.unsqueeze(1).expand(B, self.num_emotions, D)
-        
-        # Concatenate AU and Emotion node features
-        node_features = torch.cat([au_embeddings_stacked, emo_expanded], dim=1)  # (B, N_AU+N_EMO, D)
+        # Concatenate AU and Emotion node features directly
+        node_features = torch.cat([au_embeddings_stacked, emotion_embeddings_stacked], dim=1)  # (B, N_AU+N_EMO, D)
         
         edge_index, edge_weight = self._build_edge_index_from_adj(self.au_exp_adj)
         au_exp_adj_sigmoid = torch.sigmoid(self.au_exp_adj)

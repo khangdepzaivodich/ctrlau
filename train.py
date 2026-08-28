@@ -113,6 +113,13 @@ def main():
         help="Path to a checkpoint (.pth file) to resume training from"
     )
     parser.add_argument(
+        "--phase",
+        type=int,
+        default=1,
+        choices=[1, 2, 3],
+        help="Training phase: 1 (Feature Extraction), 2 (Graph Learning), 3 (End-to-End Fine-Tuning)"
+    )
+    parser.add_argument(
         "--fold",
         type=int,
         default=1,
@@ -125,10 +132,10 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Standard DISFA 3-Fold Cross Validation Subject Splits
-    group_1 = ["SN001", "SN002", "SN003", "SN004", "SN005", "SN006", "SN007", "SN008", "SN009"]
-    group_2 = ["SN010", "SN011", "SN012", "SN013", "SN016", "SN017", "SN018", "SN021", "SN023"]
-    group_3 = ["SN024", "SN025", "SN026", "SN027", "SN028", "SN029", "SN030", "SN031", "SN032"]
+    # Exact DISFA 3-Fold Splits from MultiviewSymAU
+    group_1 = ["SN002", "SN010", "SN001", "SN026", "SN027", "SN032", "SN030", "SN009", "SN016"]
+    group_2 = ["SN013", "SN018", "SN011", "SN028", "SN012", "SN006", "SN031", "SN021", "SN024"]
+    group_3 = ["SN003", "SN029", "SN023", "SN025", "SN008", "SN005", "SN007", "SN017", "SN004"]
     
     if args.fold == 1:
         train_subjects = group_1 + group_2
@@ -161,6 +168,55 @@ def main():
     
     # Model
     model = CtrlAUModel(cfg=cfg).to(device)
+    
+    # ==========================================
+    # 3-Phase Training Logic
+    # ==========================================
+    if args.phase == 1:
+        print("=== Phase 1: Feature Extraction ===")
+        print("Turning OFF graph losses.")
+        model.cfg.lambda_dag = 0.0
+        model.cfg.lambda_causal_au = 0.0
+        model.cfg.lambda_causal_exp = 0.0
+        model.cfg.lambda_facs_au = 0.0
+        model.cfg.lambda_facs_exp = 0.0
+        model.cfg.lambda_au_au = 0.0
+        model.cfg.lambda_graph_au = 0.0
+        model.cfg.lambda_graph_emo = 0.0
+        model.cfg.lambda_cf_important = 0.0
+        model.cfg.lambda_cf_unimportant = 0.0
+        
+    elif args.phase == 2:
+        print("=== Phase 2: Graph Learning ===")
+        print("Freezing Backbone and CNNs. Training only the Graph Modules.")
+        for param in model.backbone.parameters():
+            param.requires_grad = False
+        for param in model.au_head.parameters():
+            param.requires_grad = False
+        for param in model.emotion_head.parameters():
+            param.requires_grad = False
+        for param in model.text_encoder.parameters():
+            param.requires_grad = False
+        for param in model.visual_proj.parameters():
+            param.requires_grad = False
+        for param in model.text_proj.parameters():
+            param.requires_grad = False
+            
+        model.cfg.lambda_au = 0.0
+        model.cfg.lambda_emotion = 0.0
+        model.cfg.lambda_ib = 0.0
+        model.cfg.lambda_align = 0.0
+        model.cfg.lambda_decorr = 0.0
+        
+    elif args.phase == 3:
+        print("=== Phase 3: End-to-End Fine-Tuning ===")
+        print("Unfreezing everything. Setting low learning rate.")
+        for param in model.parameters():
+            param.requires_grad = True
+        for param in model.text_encoder.parameters():
+            param.requires_grad = False # keep CLIP frozen
+        cfg.lr = 1e-5
+        
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     

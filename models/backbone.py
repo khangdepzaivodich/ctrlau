@@ -18,8 +18,8 @@ class VisualBackbone(nn.Module):
         resnet = models.resnet18(
             weights=models.ResNet18_Weights.DEFAULT if pretrained else None
         )
-        # Remove the final FC layer
-        self.features = nn.Sequential(*list(resnet.children())[:-1])  # up to avgpool
+        # Remove the final FC layer AND the AdaptiveAvgPool2d layer
+        self.features = nn.Sequential(*list(resnet.children())[:-2])
         self.feat_dim = feat_dim
     
     def forward(self, x):
@@ -27,8 +27,8 @@ class VisualBackbone(nn.Module):
         Args:
             x: (B, 3, H, W) input images
         Returns:
-            z_img: (B, feat_dim) global image features
+            z_img: (B, feat_dim, D_patches) sequence of spatial patches
         """
-        z = self.features(x)       # (B, 2048, 1, 1)
-        z = z.flatten(start_dim=1) # (B, 2048)
+        z = self.features(x)       # (B, 512, 7, 7) for ResNet18
+        z = z.flatten(start_dim=2) # (B, 512, 49)
         return z
