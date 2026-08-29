@@ -91,8 +91,8 @@ class ModelConfig:
     img_size = 224
     
     # Backbone
-    backbone = "resnet18"
-    backbone_feat_dim = 512        # ResNet18 final feature dim
+    backbone = "resnet50"
+    backbone_feat_dim = 2048       # ResNet50 final feature dim
     
     # Embedding dims
     au_embed_dim = 256             # per-AU embedding dimension

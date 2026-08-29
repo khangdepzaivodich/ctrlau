@@ -149,20 +149,55 @@ class HSICDisentanglementLoss(nn.Module):
         return l_ib, l_align, l_decorr
 
 
+class WeightedAsymmetricLoss(nn.Module):
+    """
+    Weighted Asymmetric Loss from the original MultiviewSymAU repo.
+    Specifically designed for heavily imbalanced AU datasets.
+    """
+    def __init__(self, eps=1e-8, disable_torch_grad=True, weight=None):
+        super(WeightedAsymmetricLoss, self).__init__()
+        self.disable_torch_grad = disable_torch_grad
+        self.eps = eps
+        self.weight = weight
+
+    def forward(self, x, y):
+        xs_pos = x
+        xs_neg = 1 - x
+
+        # Basic CE calculation
+        los_pos = y * torch.log(xs_pos.clamp(min=self.eps))
+        los_neg = (1 - y) * torch.log(xs_neg.clamp(min=self.eps))
+
+        # Asymmetric Focusing (down-weight easy negatives)
+        if self.disable_torch_grad:
+            torch.set_grad_enabled(False)
+        neg_weight = 1 - xs_neg
+        if self.disable_torch_grad:
+            torch.set_grad_enabled(True)
+            
+        loss = los_pos + neg_weight * los_neg
+
+        if self.weight is not None:
+            # Ensure weight is on the same device as loss
+            self.weight = self.weight.to(loss.device)
+            loss = loss * self.weight.view(1, -1)
+
+        loss = loss.mean()
+        return -loss
+
 # ============================================================
 # Contrastive Loss (InfoNCE)
 # ============================================================
 
 class ContrastiveLoss(nn.Module):
     """
-    InfoNCE-style contrastive loss to align visual AU embeddings
-    with textual AU description embeddings in a shared space.
+    Standard InfoNCE contrastive loss.
+    Assumes embeddings are L2-normalized.
     """
-    
     def __init__(self, temperature=0.07):
         super().__init__()
         self.temperature = temperature
-    
+        
     def forward(self, visual_embeds, text_embeds):
         """
         Args:

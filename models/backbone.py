@@ -13,11 +13,16 @@ class VisualBackbone(nn.Module):
     The final classification layer is removed.
     """
     
-    def __init__(self, feat_dim=512, pretrained=True):
+    def __init__(self, name="resnet50", feat_dim=2048, pretrained=True):
         super().__init__()
-        resnet = models.resnet18(
-            weights=models.ResNet18_Weights.DEFAULT if pretrained else None
-        )
+        if name == "resnet50":
+            resnet = models.resnet50(
+                weights=models.ResNet50_Weights.DEFAULT if pretrained else None
+            )
+        else:
+            resnet = models.resnet18(
+                weights=models.ResNet18_Weights.DEFAULT if pretrained else None
+            )
         # Remove the final FC layer AND the AdaptiveAvgPool2d layer
         self.features = nn.Sequential(*list(resnet.children())[:-2])
         self.feat_dim = feat_dim

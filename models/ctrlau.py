@@ -16,7 +16,7 @@ from config import (
 from losses import (
     HSICDisentanglementLoss, ContrastiveLoss, DAGLoss,
     ViolationLoss, FACSEmotionViolationLoss, CounterfactualLoss, FocalLoss,
-    FACSAUViolationLoss
+    FACSAUViolationLoss, WeightedAsymmetricLoss
 )
 from .backbone import VisualBackbone
 from .text_encoder import TextEncoder
@@ -50,6 +50,7 @@ class CtrlAUModel(nn.Module):
         
         # ---- Modules ----
         self.backbone = VisualBackbone(
+            name=cfg.backbone,
             feat_dim=cfg.backbone_feat_dim,
             pretrained=True,
         )
@@ -130,7 +131,8 @@ class CtrlAUModel(nn.Module):
         ])
         au_pos_weights = torch.sqrt(raw_au_pos_weights)
         
-        self.au_bce_loss = FocalLoss(gamma=2.0, pos_weight=au_pos_weights)
+        # Use Asymmetric Loss to properly handle massive negatives without completely overfitting
+        self.au_bce_loss = WeightedAsymmetricLoss(weight=au_pos_weights)
         
         # ---- Emotion weak supervision loss ----
         self.emotion_bce_loss = nn.BCELoss()
