@@ -304,10 +304,10 @@ class CtrlAUModel(nn.Module):
             cf_mask = (au_au_imp_mask.diagonal() > self.cf_threshold).float()  # (N_AU,)
             
             # Perturb the AU node embeddings (graph input)
-            noise_imp = torch.randn_like(au_emb_stacked) * cfg.noise_std
+            noise_imp = torch.randn_like(au_emb_stacked) * self.cfg.noise_std
             au_embeddings_imp = au_emb_stacked + noise_imp * cf_mask.view(1, -1, 1)
             
-            noise_unimp = torch.randn_like(au_emb_stacked) * cfg.noise_std
+            noise_unimp = torch.randn_like(au_emb_stacked) * self.cfg.noise_std
             au_embeddings_unimp = au_emb_stacked + noise_unimp * (1.0 - cf_mask.view(1, -1, 1))
             
             # Forward perturbed embeddings through AU-Exp graph to get new predictions
