@@ -5,9 +5,9 @@ Contains all hyperparameters, AU definitions, and prior knowledge matrices.
 import torch
 
 # ============================================================
-# DISFA Dataset AUs (the 12 AUs labeled in DISFA)
+# DISFA Dataset AUs (the 8 AUs used in standard benchmarks)
 # ============================================================
-DISFA_AUS = [1, 2, 4, 5, 6, 9, 12, 15, 17, 20, 25, 26]
+DISFA_AUS = [1, 2, 4, 6, 9, 12, 25, 26]
 NUM_AUS = len(DISFA_AUS)
 AU_INDEX = {au: i for i, au in enumerate(DISFA_AUS)}
 
@@ -54,23 +54,23 @@ EMOTION_AU_RULES = {
         "operator": "AND",
     },
     "sadness": {
-        "required_aus": [1, 4, 15],
+        "required_aus": [1, 4],    # Dropped missing AU15
         "operator": "AND",
     },
     "surprise": {
-        "required_aus": [1, 2, 5, 26],
+        "required_aus": [1, 2, 26], # Dropped missing AU5
         "operator": "AND",
     },
     "fear": {
-        "required_aus": [1, 2, 4, 5, 20, 26],
+        "required_aus": [1, 2, 4, 26], # Dropped missing AU5, AU20
         "operator": "AND",
     },
     "anger": {
-        "required_aus": [4, 5, 17],
+        "required_aus": [4],        # Dropped missing AU5, AU17
         "operator": "AND",
     },
     "disgust": {
-        "required_aus": [9, 15],
+        "required_aus": [9],        # Dropped missing AU15
         "operator": "AND",
     },
 }

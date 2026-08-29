@@ -315,40 +315,45 @@ class ViolationLoss(nn.Module):
 class FACSEmotionViolationLoss(nn.Module):
     """
     Computes strict FACS-based hypergraph violations for AU-Expression logic.
-    Instead of pairwise edges, evaluates strict AND gates using Fuzzy Logic (T-norm).
+    Evaluates strict logic gates using Fuzzy Logic (T-norm).
     Formula: Prob(A) * Prob(B) * ... * (1 - Prob(Emotion))
     """
     def __init__(self):
         super().__init__()
+        # Import config to get the dynamic indices
+        from config import EMOTION_AU_RULES_IDX, EMOTIONS
+        self.rules = EMOTION_AU_RULES_IDX
+        self.emotions = EMOTIONS
         
     def forward(self, au_probs, emotion_probs):
         """
         Args:
-            au_probs: (B, 12) AU probabilities
-            emotion_probs: (B, 7) Emotion probabilities
+            au_probs: (B, N_AU) AU probabilities
+            emotion_probs: (B, N_EMOTIONS) Emotion probabilities
         Returns:
             violation loss scalar
         """
-        # Happiness: AU6(4) * AU12(6) -> Happy(0)
-        v_happy = au_probs[:, 4] * au_probs[:, 6] * (1.0 - emotion_probs[:, 0])
+        device = au_probs.device
+        total_violation = torch.tensor(0.0, device=device)
         
-        # Sadness: AU1(0) * AU4(2) * AU15(7) -> Sad(1)
-        v_sad = au_probs[:, 0] * au_probs[:, 2] * au_probs[:, 7] * (1.0 - emotion_probs[:, 1])
-        
-        # Surprise: AU1(0) * AU2(1) * AU5(3) * AU26(11) -> Surprise(2)
-        v_sur = au_probs[:, 0] * au_probs[:, 1] * au_probs[:, 3] * au_probs[:, 11] * (1.0 - emotion_probs[:, 2])
-        
-        # Fear: AU1(0) * AU2(1) * AU4(2) * AU5(3) * AU20(9) * AU26(11) -> Fear(3)
-        v_fear = au_probs[:, 0] * au_probs[:, 1] * au_probs[:, 2] * au_probs[:, 3] * au_probs[:, 9] * au_probs[:, 11] * (1.0 - emotion_probs[:, 3])
-        
-        # Disgust: AU9(5) * AU15(7) -> Disgust(4)
-        v_dis = au_probs[:, 5] * au_probs[:, 7] * (1.0 - emotion_probs[:, 4])
-        
-        # Anger: AU4(2) * AU5(3) -> Anger(5)
-        v_ang = au_probs[:, 2] * au_probs[:, 3] * (1.0 - emotion_probs[:, 5])
-        
-        total_violation = v_happy.mean() + v_sad.mean() + v_sur.mean() + v_fear.mean() + v_dis.mean() + v_ang.mean()
-        
+        for emo_idx, emo_name in enumerate(self.emotions):
+            rule = self.rules[emo_name]
+            au_indices = rule["required_idx"]
+            
+            # Gather relevant AU probabilities
+            relevant_probs = au_probs[:, au_indices]  # (B, K)
+            
+            # T-norm (AND) over required AUs
+            if rule["operator"] == "AND":
+                au_score = relevant_probs.prod(dim=1)  # (B,)
+            else: # OR
+                au_score = 1.0 - (1.0 - relevant_probs).prod(dim=1)
+                
+            # Violation: AUs are firing but Emotion is NOT firing
+            # Violation = au_score * (1 - emotion_prob)
+            violation = au_score * (1.0 - emotion_probs[:, emo_idx])
+            total_violation += violation.mean()
+            
         return total_violation
 
 
@@ -402,17 +407,9 @@ class CounterfactualLoss(nn.Module):
 class FACSAUViolationLoss(nn.Module):
     """
     Computes violation of strict FACS anatomical rules between AUs using Fuzzy Logic (T-norms).
-    Rules extracted strictly from facs_au_rules.md for the DISFA dataset.
-    (AUs: 1, 2, 4, 5, 6, 9, 12, 15, 17, 20, 25, 26).
-    
-    AU Indices in DISFA:
-    AU4  : index 2
-    AU6  : index 4
-    AU9  : index 5
-    AU25 : index 10
-    AU26 : index 11
+    Rules extracted strictly from facs_au_rules.md.
+    Uses dynamic AU indices so it adapts to any dataset subset (e.g. 8 AUs vs 12 AUs).
     """
-    
     def __init__(self):
         super().__init__()
         
@@ -425,26 +422,35 @@ class FACSAUViolationLoss(nn.Module):
         """
         device = au_probs.device
         loss = torch.tensor(0.0, device=device)
+        from config import AU_INDEX
         
-        # Extract relevant AUs
-        p_au4 = au_probs[:, 2]
-        p_au6 = au_probs[:, 4]
-        p_au9 = au_probs[:, 5]
-        p_au25 = au_probs[:, 10]
-        p_au26 = au_probs[:, 11]
+        # Safe helper to fetch probability or return zeros if AU is not in the dataset
+        def get_p(au_num):
+            if au_num in AU_INDEX:
+                return au_probs[:, AU_INDEX[au_num]]
+            else:
+                return torch.zeros(au_probs.size(0), device=device)
+                
+        p_au4 = get_p(4)
+        p_au6 = get_p(6)
+        p_au9 = get_p(9)
+        p_au25 = get_p(25)
+        p_au26 = get_p(26)
         
         # 1. Mutually Exclusive Rules (XOR)
         # Rule: AU 25 XOR AU 26
         # Fuzzy violation: p(AU25) AND p(AU26) should be 0
-        loss += (p_au25 * p_au26).mean()
+        if 25 in AU_INDEX and 26 in AU_INDEX:
+            loss += (p_au25 * p_au26).mean()
         
         # 2. Subsuming Rules
-        # Rule: AU 9 subsumes AU 4 (If AU9 is active, AU4 is inherently active/subsumed)
+        # Rule: AU 9 subsumes AU 4
         # Fuzzy violation: p(AU9) AND NOT p(AU4) should be 0
-        loss += (p_au9 * (1.0 - p_au4)).mean()
+        if 9 in AU_INDEX and 4 in AU_INDEX:
+            loss += (p_au9 * (1.0 - p_au4)).mean()
         
-        # Rule: AU 9 subsumes AU 6 (If AU9 is active, AU6 is inherently active/subsumed)
-        # Fuzzy violation: p(AU9) AND NOT p(AU6) should be 0
-        loss += (p_au9 * (1.0 - p_au6)).mean()
+        # Rule: AU 9 subsumes AU 6
+        if 9 in AU_INDEX and 6 in AU_INDEX:
+            loss += (p_au9 * (1.0 - p_au6)).mean()
         
         return loss

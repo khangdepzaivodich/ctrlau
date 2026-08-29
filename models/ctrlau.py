@@ -136,6 +136,9 @@ class CtrlAUModel(nn.Module):
         # ---- Emotion weak supervision loss ----
         self.emotion_bce_loss = nn.BCELoss()
         
+        # ---- Counterfactual mask threshold ----
+        self.cf_threshold = nn.Parameter(torch.tensor(0.5))
+        
         # ---- Precompute text embeddings (descriptions are fixed) ----
         self._text_descriptions = [AU_DESCRIPTIONS[au] for au in DISFA_AUS]
         self._cached_text_emb = None
@@ -146,31 +149,7 @@ class CtrlAUModel(nn.Module):
             self._cached_text_emb = self.text_encoder(self._text_descriptions)
         return self._cached_text_emb
     
-    def _perturb_features(self, z_img, mask_vector, mode="important"):
-        """
-        Perturb z_img features based on importance mask.
-        
-        For 'important': add noise to important dimensions (mask=1)
-        For 'unimportant': add noise to unimportant dimensions (mask=0)
-        
-        Args:
-            z_img: (B, D) feature vector
-            mask_vector: (D,) importance mask (values in {0, 1})
-            mode: 'important' or 'unimportant'
-        Returns:
-            perturbed_z: (B, D)
-        """
-        noise = torch.randn_like(z_img) * self.cfg.noise_std
-        
-        if mode == "important":
-            # Perturb where mask = 1
-            perturbed_z = z_img + noise * mask_vector.unsqueeze(0).unsqueeze(2)
-        else:
-            # Perturb where mask = 0
-            perturbed_z = z_img + noise * (1.0 - mask_vector.unsqueeze(0).unsqueeze(2))
-        
-        return perturbed_z
-    
+
     def forward(self, images, au_labels=None):
         """
         Full forward pass.
@@ -322,24 +301,36 @@ class CtrlAUModel(nn.Module):
             losses["loss_graph_emo"] = loss_graph_emo
             
             # --- Counterfactual intervention ---
-            # Derive a z_img-level mask from AU importance.
-            # Each AU's importance (diagonal of AU-AU importance mask) weights
-            # how much that AU's corresponding shared_fc features matter.
-            # We create a (D_backbone,) mask by thresholding z_img feature magnitudes.
-            # Pool over batch (dim=0) and patches (dim=2)
-            z_img_magnitude = z_img.detach().mean(dim=(0, 2)).abs()  # (D_backbone,)
-            cf_mask = (z_img_magnitude > z_img_magnitude.median()).float()  # (D_backbone,)
+            # Derive mask from graph's learned au_au_imp_mask (diagonal is self-importance)
+            cf_mask = (au_au_imp_mask.diagonal() > self.cf_threshold).float()  # (N_AU,)
             
-            # Important perturbation
-            z_img_imp_perturbed = self._perturb_features(z_img, cf_mask, mode="important")
-            _, au_logits_imp, au_probs_imp = self.au_head(z_img_imp_perturbed)
+            # Perturb the AU node embeddings (graph input)
+            noise_imp = torch.randn_like(au_emb_stacked) * cfg.noise_std
+            au_embeddings_imp = au_emb_stacked + noise_imp * cf_mask.view(1, -1, 1)
             
-            # Unimportant perturbation
-            z_img_unimp_perturbed = self._perturb_features(z_img, cf_mask, mode="unimportant")
-            _, au_logits_unimp, au_probs_unimp = self.au_head(z_img_unimp_perturbed)
+            noise_unimp = torch.randn_like(au_emb_stacked) * cfg.noise_std
+            au_embeddings_unimp = au_emb_stacked + noise_unimp * (1.0 - cf_mask.view(1, -1, 1))
             
+            # Forward perturbed embeddings through AU-Exp graph to get new predictions
+            updated_nodes_imp, _ = self.graph_module.forward_au_exp(au_embeddings_imp, emotion_emb_stacked)
+            updated_au_imp = updated_nodes_imp[:, :NUM_AUS, :]
+            
+            graph_au_logits_imp = []
+            for i in range(NUM_AUS):
+                graph_au_logits_imp.append(self.graph_au_classifiers[i](updated_au_imp[:, i, :]))
+            graph_au_probs_imp = torch.sigmoid(torch.cat(graph_au_logits_imp, dim=1))
+            
+            updated_nodes_unimp, _ = self.graph_module.forward_au_exp(au_embeddings_unimp, emotion_emb_stacked)
+            updated_au_unimp = updated_nodes_unimp[:, :NUM_AUS, :]
+            
+            graph_au_logits_unimp = []
+            for i in range(NUM_AUS):
+                graph_au_logits_unimp.append(self.graph_au_classifiers[i](updated_au_unimp[:, i, :]))
+            graph_au_probs_unimp = torch.sigmoid(torch.cat(graph_au_logits_unimp, dim=1))
+            
+            # Compute CF loss on the graph predictions
             loss_cf_imp, loss_cf_unimp = self.cf_loss(
-                au_probs, au_probs_imp, au_probs_unimp
+                graph_au_probs.detach(), graph_au_probs_imp, graph_au_probs_unimp
             )
             losses["loss_cf_important"] = loss_cf_imp
             losses["loss_cf_unimportant"] = loss_cf_unimp
