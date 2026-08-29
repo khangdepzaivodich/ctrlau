@@ -123,18 +123,15 @@ class CtrlAUModel(nn.Module):
         # ---- AU detection loss (Focal Loss with Dataset Pos Weights) ----
         # Original exact dataset weights (Negative / Positive samples):
         # [AU1, AU2, AU4, AU5, AU6, AU9, AU12, AU15, AU17, AU20, AU25, AU26]
+        # We apply Square Root smoothing to prevent extreme imbalances (like AU5's 112.75) 
+        # from destroying precision by over-predicting positive classes.
         raw_au_pos_weights = torch.tensor([
             19.11, 22.18, 5.56, 112.75, 11.67, 22.90, 
             6.76, 47.77, 18.86, 43.48, 2.61, 10.34
         ])
+        au_pos_weights = torch.sqrt(raw_au_pos_weights)
         
-        # EXACT MultiviewSymAU Normalization:
-        # Prevent massive loss explosion by normalizing the weights so they sum to N_AU (mean=1.0)
-        # This keeps the overall learning rate scale intact.
-        au_pos_weights = (raw_au_pos_weights / raw_au_pos_weights.sum()) * 12.0
-        
-        # Use Asymmetric Loss to properly handle massive negatives without completely overfitting
-        self.au_bce_loss = WeightedAsymmetricLoss(weight=au_pos_weights)
+        self.au_bce_loss = FocalLoss(gamma=2.0, pos_weight=au_pos_weights)
         
         # ---- Emotion weak supervision loss ----
         self.emotion_bce_loss = nn.BCELoss()
