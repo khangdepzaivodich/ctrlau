@@ -56,7 +56,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device):
+def evaluate(model, dataloader, device, phase=1):
     """Evaluate model."""
     model.eval()
     all_preds = []
@@ -67,7 +67,13 @@ def evaluate(model, dataloader, device):
         au_labels = batch["au_labels"].to(device)
         
         outputs = model(images)
-        au_probs = outputs["au_probs"]
+        
+        # In Phase 1, we validate the CNN Backbone.
+        # In Phase 2 & 3, we validate the final Graph predictions!
+        if phase >= 2:
+            au_probs = outputs["graph_au_probs"]
+        else:
+            au_probs = outputs["au_probs"]
         
         all_preds.append(au_probs.cpu())
         all_labels.append(au_labels.cpu())
@@ -255,7 +261,7 @@ def main():
         
         # Evaluate
         print("Validation:")
-        avg_f1 = evaluate(model, val_loader, device)
+        avg_f1 = evaluate(model, val_loader, device, phase=args.phase)
         
         scheduler.step()
         
