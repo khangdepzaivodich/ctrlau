@@ -201,6 +201,10 @@ def main():
             param.requires_grad = False
         for param in model.text_proj.parameters():
             param.requires_grad = False
+        for param in model.emotion_visual_proj.parameters():
+            param.requires_grad = False
+        for param in model.emotion_text_proj.parameters():
+            param.requires_grad = False
             
         model.cfg.lambda_au = 0.0
         model.cfg.lambda_emotion = 0.0
