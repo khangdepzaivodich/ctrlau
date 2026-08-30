@@ -11,7 +11,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     DISFA_AUS, NUM_AUS, AU_DESCRIPTIONS, NUM_EMOTIONS,
-    ModelConfig,
+    ModelConfig, EMOTION_DESCRIPTIONS, EMOTIONS
 )
 from losses import (
     HSICDisentanglementLoss, ContrastiveLoss, DAGLoss,
@@ -99,6 +99,18 @@ class CtrlAUModel(nn.Module):
             nn.Linear(cfg.shared_embed_dim, cfg.shared_embed_dim),
         )
         
+        self.emotion_visual_proj = nn.Sequential(
+            nn.Linear(cfg.au_embed_dim, cfg.shared_embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(cfg.shared_embed_dim, cfg.shared_embed_dim),
+        )
+        
+        self.emotion_text_proj = nn.Sequential(
+            nn.Linear(self.text_encoder.embed_dim, cfg.shared_embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(cfg.shared_embed_dim, cfg.shared_embed_dim),
+        )
+        
         # ---- Graph Classifiers ----
         # Takes the updated embeddings from GAT and outputs graph-based predictions
         self.au_au_classifiers = nn.ModuleList([
@@ -141,12 +153,22 @@ class CtrlAUModel(nn.Module):
         # ---- Precompute text embeddings (descriptions are fixed) ----
         self._text_descriptions = [AU_DESCRIPTIONS[au] for au in DISFA_AUS]
         self._cached_text_emb = None
+        
+        from config import EMOTIONS
+        self._emotion_text_descriptions = [EMOTION_DESCRIPTIONS[emo] for emo in EMOTIONS]
+        self._cached_emotion_text_emb = None
     
     def _get_text_embeddings(self):
         """Get or compute cached text embeddings."""
         if self._cached_text_emb is None:
             self._cached_text_emb = self.text_encoder(self._text_descriptions)
         return self._cached_text_emb
+        
+    def _get_emotion_text_embeddings(self):
+        """Get or compute cached text embeddings for emotions."""
+        if self._cached_emotion_text_emb is None:
+            self._cached_emotion_text_emb = self.text_encoder(self._emotion_text_descriptions)
+        return self._cached_emotion_text_emb
     
 
     def forward(self, images, au_labels=None):
@@ -262,6 +284,16 @@ class CtrlAUModel(nn.Module):
             loss_contrastive = self.contrastive_loss(visual_proj, text_proj)
             losses["loss_contrastive"] = loss_contrastive
             
+            # --- Emotion Contrastive loss (text-visual alignment) ---
+            emo_text_emb = self._get_emotion_text_embeddings() # (N_EMO, text_dim)
+            emo_emb_mean = emotion_emb_stacked.mean(dim=0)     # (N_EMO, D)
+            
+            emo_visual_proj = self.emotion_visual_proj(emo_emb_mean) # (N_EMO, shared_dim)
+            emo_text_proj = self.emotion_text_proj(emo_text_emb)     # (N_EMO, shared_dim)
+            
+            loss_emo_contrastive = self.contrastive_loss(emo_visual_proj, emo_text_proj)
+            losses["loss_emo_contrastive"] = loss_emo_contrastive
+            
             # --- DAG constraint on AU-AU graph ---
             loss_dag = self.dag_loss(au_au_adj)
             losses["loss_dag"] = loss_dag
@@ -342,6 +374,7 @@ class CtrlAUModel(nn.Module):
                 cfg.lambda_align * l_align +
                 cfg.lambda_decorr * l_decorr +
                 cfg.lambda_contrastive * loss_contrastive +
+                cfg.lambda_emo_contrastive * loss_emo_contrastive +
                 cfg.lambda_dag * loss_dag +
                 cfg.lambda_causal_au * loss_causal_au +
                 cfg.lambda_causal_exp * loss_causal_exp +

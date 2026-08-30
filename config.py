@@ -83,6 +83,14 @@ for emo, rule in EMOTION_AU_RULES.items():
         "operator": rule["operator"],
     }
 
+# Dynamically construct Emotion textual descriptions based on their AU components
+EMOTION_DESCRIPTIONS = {}
+for emo, rule in EMOTION_AU_RULES.items():
+    # Join the textual descriptions of all required AUs with " and "
+    desc_list = [AU_DESCRIPTIONS[au] for au in rule["required_aus"]]
+    EMOTION_DESCRIPTIONS[emo] = f"A facial expression of {emo}, characterized by: " + " and ".join(desc_list)
+
+
 # ============================================================
 # Model hyperparameters
 # ============================================================
@@ -113,11 +121,14 @@ class ModelConfig:
     noise_std = 0.1                # Gaussian noise std for perturbation
     
     # Loss weights
-    lambda_au = 1.0                # AU detection loss
-    lambda_ib = 0.1                # information bottleneck (minimize dep with zimg)
-    lambda_align = 0.1             # align AU repr with labels
-    lambda_decorr = 0.1            # decorrelate different AU reprs
-    lambda_contrastive = 0.5       # visual-text alignment
+    lambda_au = 1.0                # Base AU BCE loss
+    lambda_ib = 1e-2               # HSIC information bottleneck
+    lambda_align = 1e-2            # HSIC alignment
+    lambda_decorr = 1e-2           # HSIC decorrelation
+    lambda_contrastive = 0.1       # Text-visual contrastive loss for AUs
+    lambda_emo_contrastive = 0.1   # Text-visual contrastive loss for Emotions
+    
+    lambda_au_au = 1.0             # Phase 2: graph AU prediction
     lambda_dag = 0.1               # DAG constraint on AU-AU graph
     lambda_causal_au = 0.1         # Causal structural rule on AU-AU graph
     lambda_causal_exp = 0.1        # Causal structural rule on AU-Exp graph
