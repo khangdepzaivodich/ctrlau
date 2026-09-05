@@ -454,3 +454,77 @@ class FACSAUViolationLoss(nn.Module):
             loss += (p_au9 * (1.0 - p_au6)).mean()
         
         return loss
+
+
+# ============================================================
+# MultiviewSymAU Phase 1 Losses
+# ============================================================
+
+class WeightedAsymmetricLoss(nn.Module):
+    """
+    Weighted Asymmetric Loss (WAL) from MultiviewSymAU (Eq. 3).
+    Addresses severe AU class imbalance by dynamically downweighting easy negative examples.
+    """
+    def __init__(self, eps=1e-8, disable_torch_grad=True, weight=None):
+        super().__init__()
+        self.disable_torch_grad = disable_torch_grad
+        self.eps = eps
+        if weight is not None:
+            if isinstance(weight, torch.Tensor):
+                self.register_buffer("weight", weight)
+            else:
+                self.register_buffer("weight", torch.tensor(weight, dtype=torch.float32))
+        else:
+            self.register_buffer("weight", None)
+
+    def forward(self, x, y):
+        """
+        x: p^a (B, N_a) probabilities after sigmoid
+        y: y^a (B, N_a) ground-truth labels (0/1)
+        """
+        xs_pos = x
+        xs_neg = 1.0 - x
+
+        # Basic cross-entropy calculation
+        los_pos = y * torch.log(xs_pos.clamp(min=self.eps))
+        los_neg = (1.0 - y) * torch.log(xs_neg.clamp(min=self.eps))
+
+        # Asymmetric Focusing factor for negatives: (1 - p)
+        if self.disable_torch_grad:
+            torch.set_grad_enabled(False)
+        neg_weight = 1.0 - xs_neg
+        if self.disable_torch_grad:
+            torch.set_grad_enabled(True)
+        loss = los_pos + neg_weight * los_neg
+
+        if self.weight is not None:
+            w = self.weight.to(x.device)
+            loss = loss * w.view(1, -1)
+
+        loss = loss.mean(dim=-1)
+        return -loss.mean()
+
+
+class ExpressionBCELoss(nn.Module):
+    """
+    Expression BCE Loss from MultiviewSymAU (Eq. 4).
+    Standard multi-label BCE over emotion probabilities without asymmetric weighting.
+    """
+    def __init__(self, eps=1e-8):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, pred_probs, targets_one_hot):
+        """
+        pred_probs: p^e (B, N_e) emotion probabilities after sigmoid
+        targets_one_hot: y^e (B, N_e) one-hot pseudo-labels
+        """
+        xs_pos = pred_probs
+        xs_neg = 1.0 - pred_probs
+
+        los_pos = targets_one_hot * torch.log(xs_pos.clamp(min=self.eps))
+        los_neg = (1.0 - targets_one_hot) * torch.log(xs_neg.clamp(min=self.eps))
+        loss = los_pos + los_neg
+        loss = loss.mean(dim=-1)
+        return -loss.mean()
+

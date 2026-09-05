@@ -128,9 +128,16 @@ def main():
     parser.add_argument(
         "--fold",
         type=int,
-        default=1,
+        default=1,  
         choices=[1, 2, 3],
         help="Which fold to use for validation (1, 2, or 3). The other two will be used for training."
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="symgraphau",
+        choices=["symgraphau", "ctrlau"],
+        help="Model architecture: 'symgraphau' (MultiviewSymAU Phase 1) or 'ctrlau' (Upgraded CtrlAU)"
     )
     args = parser.parse_args()
 
@@ -173,18 +180,26 @@ def main():
     )
     
     # Model
-    model = CtrlAUModel(cfg=cfg).to(device)
+    if args.model == "symgraphau":
+        from models.symgraphau import SymGraphAUModel
+        model = SymGraphAUModel(cfg=cfg).to(device)
+    else:
+        from models.ctrlau import CtrlAUModel
+        model = CtrlAUModel(cfg=cfg).to(device)
+        
+    if hasattr(model, "set_phase"):
+        model.set_phase(args.phase)
     
     # ==========================================
     # 3-Phase Training Logic
     # ==========================================
     if args.phase == 1:
         print("=== Phase 1: Feature Extraction ===")
-        print("Turning OFF graph losses.")
+        print("Turning OFF graph losses. Keeping FACS active for CNN.")
         model.cfg.lambda_dag = 0.0
         model.cfg.lambda_causal_au = 0.0
         model.cfg.lambda_causal_exp = 0.0
-        model.cfg.lambda_facs_au = 0.0
+        model.cfg.lambda_facs_au = 0.1  # Active for CNN in Phase 1
         model.cfg.lambda_facs_exp = 0.0
         model.cfg.lambda_au_au = 0.0
         model.cfg.lambda_graph_au = 0.0

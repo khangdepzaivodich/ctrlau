@@ -141,6 +141,7 @@ class CtrlAUModel(nn.Module):
             19.11, 22.18, 5.56, 11.67, 22.90, 6.76, 2.61, 10.34
         ])
         au_pos_weights = torch.sqrt(raw_au_pos_weights)
+        self.register_buffer("au_pos_weights", au_pos_weights)
         
         self.au_bce_loss = FocalLoss(gamma=2.0, pos_weight=au_pos_weights)
         
@@ -197,10 +198,9 @@ class CtrlAUModel(nn.Module):
         # au_logits: (B, N_AU)
         # au_probs: (B, N_AU)
         
-        # ============================================================
-        # 3. Emotion Head (weak supervision via fuzzy logic)
-        # ============================================================
-        emotion_embed_list, emotion_logits, emotion_probs, emotion_pseudo = self.emotion_head(z_img, au_probs)
+        # Ground emotion pseudo-labels on real labels during training (100% clean targets)
+        au_for_pseudo = au_labels.float() if (self.training and au_labels is not None) else au_probs
+        emotion_embed_list, emotion_logits, emotion_probs, emotion_pseudo = self.emotion_head(z_img, au_for_pseudo)
         
         # ============================================================
         # 4. Stack embeddings for graph processing
@@ -299,19 +299,23 @@ class CtrlAUModel(nn.Module):
             losses["loss_dag"] = loss_dag
             
             # --- Violation loss (Symmetrical Causal + FACS for both graphs) ---
-            # 1. AU-AU Causal Discovery Violation
+            # 1. AU-AU Causal Discovery Violation (grounded on real co-activations)
+            causal_au_target = au_labels.float() if au_labels is not None else graph_au_probs
             loss_causal_au = self.violation_loss(
-                au_probs, au_au_adj, au_au_pol_mask, au_au_imp_mask
+                causal_au_target, au_au_adj, au_au_pol_mask, au_au_imp_mask
             )
             losses["loss_causal_au"] = loss_causal_au
             
-            # 2. AU-AU FACS Violation (Mutually Exclusive / Subsuming)
-            loss_facs_au = self.facs_au_violation_loss(au_au_probs)
+            # 2. AU-AU FACS Violation (Dual-Stage: guides CNN in Phase 1 & 3, Graph in Phase 2 & 3)
+            loss_facs_cnn = self.facs_au_violation_loss(au_probs)
+            loss_facs_graph = self.facs_au_violation_loss(graph_au_probs)
+            loss_facs_au = loss_facs_cnn + loss_facs_graph
             losses["loss_facs_au"] = loss_facs_au
             
             # 3. AU-Expression Causal Discovery Violation
+            causal_exp_target = torch.cat([causal_au_target, emotion_pseudo], dim=1)
             loss_causal_exp = self.violation_loss(
-                torch.cat([au_probs, emotion_probs], dim=1), au_exp_adj, au_exp_pol_mask, au_exp_imp_mask
+                causal_exp_target, au_exp_adj, au_exp_pol_mask, au_exp_imp_mask
             )
             losses["loss_causal_exp"] = loss_causal_exp
             
@@ -331,15 +335,20 @@ class CtrlAUModel(nn.Module):
             loss_graph_emo = self.emotion_bce_loss(graph_emo_probs, emotion_pseudo.detach())
             losses["loss_graph_emo"] = loss_graph_emo
             
-            # --- Counterfactual intervention ---
+            # --- Counterfactual intervention (HiMod Dynamic Sparsity-Aware Perturbation) ---
             # Derive mask from graph's learned au_au_imp_mask (diagonal is self-importance)
-            cf_mask = (au_au_imp_mask.diagonal() > self.cf_threshold).float()  # (N_AU,)
+            cf_importance = au_au_imp_mask.diagonal()
+            cf_mask = (cf_importance > self.cf_threshold).float()  # (N_AU,)
+            
+            # HiMod: Scale perturbation variance adaptively based on AU class sparsity
+            # Rare AUs receive stronger exploration noise to prevent identity memorization
+            sparsity_scale = (self.au_pos_weights / self.au_pos_weights.mean()).view(1, -1, 1)
             
             # Perturb the AU node embeddings (graph input)
-            noise_imp = torch.randn_like(au_emb_stacked) * self.cfg.noise_std
+            noise_imp = torch.randn_like(au_emb_stacked) * (self.cfg.noise_std * sparsity_scale)
             au_embeddings_imp = au_emb_stacked + noise_imp * cf_mask.view(1, -1, 1)
             
-            noise_unimp = torch.randn_like(au_emb_stacked) * self.cfg.noise_std
+            noise_unimp = torch.randn_like(au_emb_stacked) * (self.cfg.noise_std * sparsity_scale)
             au_embeddings_unimp = au_emb_stacked + noise_unimp * (1.0 - cf_mask.view(1, -1, 1))
             
             # Forward perturbed embeddings through AU-Exp graph to get new predictions
