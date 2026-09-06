@@ -128,3 +128,31 @@ class DISFADataset(Dataset):
             "subject": subj,
             "frame": frame_num,
         }
+
+    def calculate_class_weights(self):
+        """
+        Calculate fold-specific AU class weights matching MultiviewSymAU / SymGraphAU:
+            occurrence_rate_i = N_pos,i / N_total
+            w_i = (1 / occurrence_rate_i) / sum(1 / occurrence_rate) * N_aus
+        Returns:
+            normalized_weights: (NUM_AUS,) tensor summing to NUM_AUS
+            occur_rates: (NUM_AUS,) tensor of occurrence percentages
+        """
+        num_samples = len(self.samples)
+        if num_samples == 0:
+            return None, None
+            
+        counts = torch.zeros(len(DISFA_AUS), dtype=torch.float32)
+        for subj, fn in self.samples:
+            for au in DISFA_AUS:
+                i = AU_INDEX[au]
+                if self.labels_cache.get((subj, au), {}).get(fn, 0) >= self.intensity_threshold:
+                    counts[i] += 1.0
+                    
+        occur_rates = counts / float(num_samples)
+        occur_rates_clamped = torch.clamp(occur_rates, min=1e-5)
+        
+        raw_weights = 1.0 / occur_rates_clamped
+        normalized_weights = raw_weights / raw_weights.sum() * len(DISFA_AUS)
+        return normalized_weights, occur_rates
+

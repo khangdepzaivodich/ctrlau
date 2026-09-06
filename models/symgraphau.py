@@ -5,6 +5,7 @@ with Graph Relational Reasoning (Stage 2).
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 import sys
 import os
@@ -20,7 +21,6 @@ from losses import (
 )
 from .backbone import VisualBackbone
 from .text_encoder import TextEncoder
-from .heads import AUHead, Conv1DExtractor
 from .gat import AUGraphModule
 from .masks import MaskModule
 
@@ -30,6 +30,7 @@ from .masks import MaskModule
 # ============================================================
 SYM_EMOTIONS = ["Angry", "Fear", "Happy", "Sad", "Surprise", "Disgust", "Neutral"]
 NUM_SYM_EMOTIONS = len(SYM_EMOTIONS)  # 7 emotions in MultiviewSymAU
+EMB_DIM = 256
 
 # M_AE matrix from MultiviewSymAU matrixMAE/M_AE_DISFA.npy (8 AUs x 7 Emotions)
 # Rows: AU1, AU2, AU4, AU6, AU9, AU12, AU25, AU26
@@ -46,39 +47,87 @@ M_AE_DISFA = torch.tensor([
 ], dtype=torch.float32)
 
 
-class SymExprHead(nn.Module):
+# ============================================================
+# MultiviewSymAU Stage 1 Head Architecture (Exact Replication)
+# ============================================================
+
+class LinearBlock(nn.Module):
     """
-    Expression Head from MultiviewSymAU Stage 1 (JFL).
-    7 independent 1D CNN branches producing per-emotion embeddings and probabilities.
-    Emotions: [Angry, Fear, Happy, Sad, Surprise, Disgust, Neutral]
+    Linear projection block mapping backbone channels (2048 -> 512).
+    Matches MultiviewSymAU/model/basic_block.py LinearBlock.
     """
-    def __init__(self, backbone_dim, num_emotions=NUM_SYM_EMOTIONS, emotion_embed_dim=256):
+    def __init__(self, in_features, out_features=None, drop=0.0):
         super().__init__()
-        self.num_emotions = num_emotions
-        self.embed_dim = emotion_embed_dim
-        
+        out_features = out_features or in_features
+        self.fc = nn.Linear(in_features, out_features)
+        self.bn = nn.BatchNorm1d(out_features)
+        self.relu = nn.ReLU(inplace=True)
+        self.drop = nn.Dropout(drop)
+        self.fc.weight.data.normal_(0, math.sqrt(2.0 / out_features))
+        self.bn.weight.data.fill_(1)
+        self.bn.bias.data.zero_()
+
+    def forward(self, x):
+        # x: (B, D, C_in) e.g. (B, 49, 2048)
+        x = self.drop(x)
+        x = self.fc(x).permute(0, 2, 1)            # (B, C_mid, D)
+        x = self.relu(self.bn(x)).permute(0, 2, 1) # (B, D, C_mid)
+        return x
+
+
+class Conv1DExtractor(nn.Module):
+    """
+    1D Convolutional extractor for a single AU / Expression branch.
+    Matches MultiviewSymAU/model/SymStage1.py Conv1DExtractor.
+    Input: (B, D, C_in) e.g. (B, 49, 512)
+    Output: (B, C_emb=256)
+    """
+    def __init__(self, in_channels: int = 512, hid_channels: int = 512, emb_channels: int = EMB_DIM):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_channels, hid_channels, kernel_size=3, padding=1)
+        self.bn1   = nn.BatchNorm1d(hid_channels)
+        self.conv2 = nn.Conv1d(hid_channels, emb_channels, kernel_size=3, padding=1)
+        self.bn2   = nn.BatchNorm1d(emb_channels)
+        self.relu  = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        # (B, D, C_in) -> (B, C_in, D) for Conv1d
+        x = x.transpose(1, 2)
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
+        emb = x.mean(dim=-1)  # Global average pool across spatial patches D
+        return emb
+
+
+class SymAUHead(nn.Module):
+    """
+    Stage-1 AU Head from MultiviewSymAU.
+    Has N_a independent Conv1DExtractor branches + linear classifiers.
+    """
+    def __init__(self, in_channels: int = 512, num_aus: int = NUM_AUS, hid_channels: int = 512, emb_channels: int = EMB_DIM):
+        super().__init__()
+        self.num_aus = num_aus
         self.extractors = nn.ModuleList([
-            Conv1DExtractor(backbone_dim, emotion_embed_dim)
-            for _ in range(num_emotions)
+            Conv1DExtractor(in_channels, hid_channels, emb_channels)
+            for _ in range(num_aus)
         ])
         self.classifiers = nn.ModuleList([
-            nn.Linear(emotion_embed_dim, 1)
-            for _ in range(num_emotions)
+            nn.Linear(emb_channels, 1)
+            for _ in range(num_aus)
         ])
-    
-    def forward(self, z_img):
+
+    def forward(self, feat):
         """
-        Args:
-            z_img: (B, 2048, 49) image patch features
+        feat: (B, D, C_mid) e.g. (B, 49, 512)
         Returns:
-            emb_list: list of 7 tensors (B, emotion_embed_dim)
-            logits: (B, 7)
-            probs: (B, 7)
+            emb_list: list of N_a tensors (B, 256)
+            logits: (B, N_a)
+            probs: (B, N_a)
         """
         emb_list = []
         logit_list = []
-        for i in range(self.num_emotions):
-            emb = self.extractors[i](z_img)
+        for i in range(self.num_aus):
+            emb = self.extractors[i](feat)
             logit = self.classifiers[i](emb)
             emb_list.append(emb)
             logit_list.append(logit)
@@ -87,18 +136,60 @@ class SymExprHead(nn.Module):
         return emb_list, logits, probs
 
 
+class SymExprHead(nn.Module):
+    """
+    Stage-1 Expression Head from MultiviewSymAU.
+    Has N_e independent Conv1DExtractor branches + linear classifiers.
+    """
+    def __init__(self, in_channels: int = 512, num_expr: int = NUM_SYM_EMOTIONS, hid_channels: int = 512, emb_channels: int = EMB_DIM):
+        super().__init__()
+        self.num_expr = num_expr
+        self.extractors = nn.ModuleList([
+            Conv1DExtractor(in_channels, hid_channels, emb_channels)
+            for _ in range(num_expr)
+        ])
+        self.classifiers = nn.ModuleList([
+            nn.Linear(emb_channels, 1)
+            for _ in range(num_expr)
+        ])
+
+    def forward(self, feat):
+        """
+        feat: (B, D, C_mid) e.g. (B, 49, 512)
+        Returns:
+            emb_list: list of N_e tensors (B, 256)
+            logits: (B, N_e)
+            probs: (B, N_e)
+        """
+        emb_list = []
+        logit_list = []
+        for i in range(self.num_expr):
+            emb = self.extractors[i](feat)
+            logit = self.classifiers[i](emb)
+            emb_list.append(emb)
+            logit_list.append(logit)
+        logits = torch.cat(logit_list, dim=1)
+        probs = torch.sigmoid(logits)
+        return emb_list, logits, probs
+
+
+# ============================================================
+# SymGraphAU Full Model
+# ============================================================
+
 class SymGraphAUModel(nn.Module):
     """
     SymGraphAU architecture:
     
     Phase 1 (Identical to MultiviewSymAU Stage 1):
     1. Image -> ResNet-50 -> z_img (2048-dim, 49 patches)
-    2. z_img -> AU Head (8 branches) -> V_a (embeddings) + p_a (AU probabilities)
-    3. z_img -> SymExprHead (7 branches) -> V_e (embeddings) + p_e (Emotion probabilities)
-    4. Y_a -> au_to_expr_pseudo(M_AE) -> Y_e (one-hot expression target with Neutral=6)
-    5. Loss L_wa = WeightedAsymmetricLoss(p_a, Y_a)
-    6. Loss L_we = ExpressionBCELoss(p_e, Y_e)
-    7. Phase 1 Total Loss = L_wa + 0.05 * L_we
+    2. z_img -> LinearBlock (2048 -> 512) -> feat (49, 512)
+    3. feat -> SymAUHead (8 branches) -> V_a (embeddings) + p_a (AU probabilities)
+    4. feat -> SymExprHead (7 branches) -> V_e (embeddings) + p_e (Emotion probabilities)
+    5. Y_a -> au_to_expr_pseudo(M_AE) -> Y_e (one-hot expression target with Neutral=6)
+    6. Loss L_wa = WeightedAsymmetricLoss(p_a, Y_a)
+    7. Loss L_we = ExpressionBCELoss(p_e, Y_e)
+    8. Phase 1 Total Loss = L_wa + 0.05 * L_we
     
     Phase 2 (Stage 2 Relational Reasoning):
     - GAT on AU-AU graph and AU-Expression graph
@@ -126,25 +217,35 @@ class SymGraphAUModel(nn.Module):
             pretrained=True,
         )
         
+        # MultiviewSymAU Stage 1 Shared Linear Projection (2048 -> 512)
+        mid_channels = cfg.backbone_feat_dim // 4  # 2048 // 4 = 512
+        self.global_linear = LinearBlock(
+            in_features=cfg.backbone_feat_dim,
+            out_features=mid_channels,
+        )
+        
         self.text_encoder = TextEncoder(
             clip_model_name=cfg.clip_model_name,
         )
         
-        self.au_head = AUHead(
-            backbone_dim=cfg.backbone_feat_dim,
+        # MultiviewSymAU Stage 1 8-branch AU Head
+        self.au_head = SymAUHead(
+            in_channels=mid_channels,
             num_aus=NUM_AUS,
-            au_embed_dim=cfg.au_embed_dim,
+            hid_channels=mid_channels,
+            emb_channels=EMB_DIM,
         )
         
-        # 7-class Emotion Head (matches MultiviewSymAU)
+        # MultiviewSymAU Stage 1 7-branch Emotion Head
         self.emotion_head = SymExprHead(
-            backbone_dim=cfg.backbone_feat_dim,
-            num_emotions=self.num_emotions,
-            emotion_embed_dim=cfg.emotion_embed_dim,
+            in_channels=mid_channels,
+            num_expr=self.num_emotions,
+            hid_channels=mid_channels,
+            emb_channels=EMB_DIM,
         )
         
         self.graph_module = AUGraphModule(
-            embed_dim=cfg.au_embed_dim,
+            embed_dim=EMB_DIM,
             num_aus=NUM_AUS,
             num_emotions=self.num_emotions,
             gat_hidden_dim=cfg.gat_hidden_dim,
@@ -160,7 +261,7 @@ class SymGraphAUModel(nn.Module):
         
         # ---- Projection heads for contrastive alignment ----
         self.visual_proj = nn.Sequential(
-            nn.Linear(cfg.au_embed_dim, cfg.shared_embed_dim),
+            nn.Linear(EMB_DIM, cfg.shared_embed_dim),
             nn.ReLU(inplace=True),
             nn.Linear(cfg.shared_embed_dim, cfg.shared_embed_dim),
         )
@@ -172,7 +273,7 @@ class SymGraphAUModel(nn.Module):
         )
         
         self.emotion_visual_proj = nn.Sequential(
-            nn.Linear(cfg.au_embed_dim, cfg.shared_embed_dim),
+            nn.Linear(EMB_DIM, cfg.shared_embed_dim),
             nn.ReLU(inplace=True),
             nn.Linear(cfg.shared_embed_dim, cfg.shared_embed_dim),
         )
@@ -185,13 +286,13 @@ class SymGraphAUModel(nn.Module):
         
         # ---- Graph Classifiers ----
         self.au_au_classifiers = nn.ModuleList([
-            nn.Linear(cfg.au_embed_dim, 1) for _ in range(NUM_AUS)
+            nn.Linear(EMB_DIM, 1) for _ in range(NUM_AUS)
         ])
         self.graph_au_classifiers = nn.ModuleList([
-            nn.Linear(cfg.au_embed_dim, 1) for _ in range(NUM_AUS)
+            nn.Linear(EMB_DIM, 1) for _ in range(NUM_AUS)
         ])
         self.graph_emo_classifiers = nn.ModuleList([
-            nn.Linear(cfg.au_embed_dim, 1) for _ in range(self.num_emotions)
+            nn.Linear(EMB_DIM, 1) for _ in range(self.num_emotions)
         ])
         
         # ---- MultiviewSymAU Stage 1 Losses ----
@@ -264,6 +365,8 @@ class SymGraphAUModel(nn.Module):
             # Freeze Backbone and CNN heads, train Graph reasoning
             for param in self.backbone.parameters():
                 param.requires_grad = False
+            for param in self.global_linear.parameters():
+                param.requires_grad = False
             for param in self.au_head.parameters():
                 param.requires_grad = False
             for param in self.emotion_head.parameters():
@@ -294,6 +397,12 @@ class SymGraphAUModel(nn.Module):
                 param.requires_grad = True
             for param in self.text_encoder.parameters():
                 param.requires_grad = False
+
+    def update_class_weights(self, weights: torch.Tensor):
+        """Update AU class weights dynamically (e.g. for specific folds)."""
+        w = weights / weights.sum() * NUM_AUS
+        self.wal_weights.copy_(w)
+        self.wal_loss.weight = self.wal_weights
 
     def _get_text_embeddings(self):
         """Get or compute cached text embeddings."""
@@ -339,22 +448,28 @@ class SymGraphAUModel(nn.Module):
         B = images.size(0)
         
         # ============================================================
-        # 1. Visual Backbone (ResNet-50)
+        # 1. Visual Backbone (ResNet-50) -> (B, 49, 2048)
         # ============================================================
         z_img = self.backbone(images)  # (B, 2048, 49)
+        feat = z_img.permute(0, 2, 1)  # (B, 49, 2048)
         
         # ============================================================
-        # 2. AU Head (8 branches -> V_a and p_a)
+        # 2. Global Linear (LinearBlock 2048 -> 512)
         # ============================================================
-        au_embeddings, au_logits, au_probs = self.au_head(z_img)
+        feat = self.global_linear(feat)  # (B, 49, 512)
+        
+        # ============================================================
+        # 3. AU Head (8 branches -> V_a and p_a)
+        # ============================================================
+        au_embeddings, au_logits, au_probs = self.au_head(feat)
         # au_embeddings: list of 8 tensors, each (B, 256)
         # au_logits: (B, 8)
         # au_probs: (B, 8)
         
         # ============================================================
-        # 3. Expression Head (7 branches -> V_e and p_e)
+        # 4. Expression Head (7 branches -> V_e and p_e)
         # ============================================================
-        emotion_embed_list, emotion_logits, emotion_probs = self.emotion_head(z_img)
+        emotion_embed_list, emotion_logits, emotion_probs = self.emotion_head(feat)
         # emotion_embed_list: list of 7 tensors, each (B, 256)
         # emotion_logits: (B, 7)
         # emotion_probs: (B, 7)

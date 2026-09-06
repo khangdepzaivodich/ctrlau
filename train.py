@@ -189,6 +189,42 @@ def main():
         
     if hasattr(model, "set_phase"):
         model.set_phase(args.phase)
+        
+    # ------------------------------------------------------------
+    # Prior AU Class Weights (Fold-Specific Inverse Frequencies)
+    # ------------------------------------------------------------
+    loaded = False
+    weight_file_candidates = [
+        os.path.join(args.data_root, "list", f"DISFA_train_weight_fold{args.fold}.txt"),
+        os.path.join(args.data_root, "list", f"DISFA_weight_fold{args.fold}.txt"),
+        os.path.join(args.data_root, f"DISFA_train_weight_fold{args.fold}.txt"),
+        os.path.join(args.data_root, f"DISFA_weight_fold{args.fold}.txt"),
+    ]
+    for w_path in weight_file_candidates:
+        if os.path.isfile(w_path):
+            import numpy as np
+            print(f"Loading AU class weights for Fold {args.fold} from: {w_path}")
+            loaded_weights = torch.from_numpy(np.loadtxt(w_path)).float().to(device)
+            if hasattr(model, "update_class_weights"):
+                model.update_class_weights(loaded_weights)
+            elif hasattr(model, "wal_loss"):
+                model.wal_loss.weight = loaded_weights
+            loaded = True
+            break
+            
+    if not loaded:
+        print(f"Weight file not found in dataset. Calculating prior class weights directly from training set (Fold {args.fold})...")
+        computed_weights, occur_rates = train_dataset.calculate_class_weights()
+        if computed_weights is not None:
+            computed_weights = computed_weights.to(device)
+            if hasattr(model, "update_class_weights"):
+                model.update_class_weights(computed_weights)
+            elif hasattr(model, "wal_loss"):
+                model.wal_loss.weight = computed_weights
+            print(f"Successfully calculated AU weights for Fold {args.fold} (sum={computed_weights.sum().item():.2f}):")
+            for au_idx, au_id in enumerate(DISFA_AUS):
+                rate_pct = occur_rates[au_idx].item() * 100
+                print(f"  AU{au_id:<2}: weight={computed_weights[au_idx].item():.4f} (occurrence: {rate_pct:.2f}%)")
     
     # ==========================================
     # 3-Phase Training Logic

@@ -39,10 +39,11 @@ def test_symgraphau():
     loss.backward()
     print("Backward pass successful!")
     
-    # Verify only backbone, au_head, emotion_head got gradients
+    # Verify only backbone, global_linear, au_head, emotion_head got gradients
     assert model.backbone.features[0].weight.grad is not None
-    assert model.au_head.au_embed_heads[0].net[0].weight.grad is not None
-    assert model.emotion_head.extractors[0].net[0].weight.grad is not None
+    assert model.global_linear.fc.weight.grad is not None
+    assert model.au_head.extractors[0].conv1.weight.grad is not None
+    assert model.emotion_head.extractors[0].conv1.weight.grad is not None
     # Verify graph module did NOT get gradients
     for p in model.graph_module.parameters():
         assert p.grad is None

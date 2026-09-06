@@ -491,10 +491,9 @@ class WeightedAsymmetricLoss(nn.Module):
 
         # Asymmetric Focusing factor for negatives: (1 - p)
         if self.disable_torch_grad:
-            torch.set_grad_enabled(False)
-        neg_weight = 1.0 - xs_neg
-        if self.disable_torch_grad:
-            torch.set_grad_enabled(True)
+            neg_weight = (1.0 - xs_neg).detach()
+        else:
+            neg_weight = 1.0 - xs_neg
         loss = los_pos + neg_weight * los_neg
 
         if self.weight is not None:
