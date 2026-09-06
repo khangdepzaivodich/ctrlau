@@ -43,8 +43,18 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
         
         if (batch_idx + 1) % 50 == 0:
             avg_total = running_losses["total_loss"] / num_batches
-            print(f"  Epoch {epoch}, Batch {batch_idx + 1}/{len(dataloader)}, "
-                  f"Total Loss: {avg_total:.4f}")
+            msg = f"  Epoch {epoch}, Batch {batch_idx + 1}/{len(dataloader)}, Total Loss: {avg_total:.4f}"
+            if "loss_wa" in running_losses:
+                msg += f", L_wa: {running_losses['loss_wa'] / num_batches:.4f}"
+            if "loss_we" in running_losses:
+                msg += f", L_we: {running_losses['loss_we'] / num_batches:.4f}"
+            if "loss_contrastive" in running_losses and running_losses['loss_contrastive'] > 0:
+                msg += f", L_clip: {running_losses['loss_contrastive'] / num_batches:.4f}"
+            if "loss_decorr" in running_losses and running_losses['loss_decorr'] > 0:
+                msg += f", L_decorr: {running_losses['loss_decorr'] / num_batches:.4f}"
+            if "loss_facs_au" in running_losses and running_losses['loss_facs_au'] > 0:
+                msg += f", L_facs: {running_losses['loss_facs_au'] / num_batches:.4f}"
+            print(msg)
     
     # Print epoch summary
     print(f"\n--- Epoch {epoch} Summary ---")
@@ -231,11 +241,29 @@ def main():
     # ==========================================
     if args.phase == 1:
         print("=== Phase 1: Feature Extraction ===")
-        print("Turning OFF graph losses. Keeping FACS active for CNN.")
+        if args.model == "ctrlau":
+            print("CtrlAU Method: Combining SymGraphAU Backbone with Phase 1 Regularizers:")
+            print("  - HSIC Disentanglement (L_ib, L_align, L_decorr)")
+            print("  - CLIP Text-Visual Contrastive Alignment (AUs & Emotions)")
+            print("  - FACS AU Violation Loss (on CNN AU probabilities)")
+            model.cfg.lambda_ib = 1e-2
+            model.cfg.lambda_align = 1e-2
+            model.cfg.lambda_decorr = 1e-2
+            model.cfg.lambda_contrastive = 0.1
+            model.cfg.lambda_emo_contrastive = 0.1
+            model.cfg.lambda_facs_au = 0.1
+        else:
+            print("Pure SymGraphAU: MultiviewSymAU Stage 1 Baseline (No Phase 1 regularizers)")
+            model.cfg.lambda_ib = 0.0
+            model.cfg.lambda_align = 0.0
+            model.cfg.lambda_decorr = 0.0
+            model.cfg.lambda_contrastive = 0.0
+            model.cfg.lambda_emo_contrastive = 0.0
+            model.cfg.lambda_facs_au = 0.0
+
         model.cfg.lambda_dag = 0.0
         model.cfg.lambda_causal_au = 0.0
         model.cfg.lambda_causal_exp = 0.0
-        model.cfg.lambda_facs_au = 0.1  # Active for CNN in Phase 1
         model.cfg.lambda_facs_exp = 0.0
         model.cfg.lambda_au_au = 0.0
         model.cfg.lambda_graph_au = 0.0

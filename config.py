@@ -120,26 +120,26 @@ class ModelConfig:
     # Counterfactual perturbation
     noise_std = 0.1                # Gaussian noise std for perturbation
     
-    # Loss weights
-    lambda_au = 1.0                # Base AU BCE loss
+    # Loss weights: Feature Extraction & Regularizers (Phase 1, 2, 3)
+    lambda_au = 1.0                # Base AU Weighted Asymmetric Loss
+    lambda_emotion = 0.05          # Expression BCE loss weight (MultiviewSymAU gamma=0.05)
     lambda_ib = 1e-2               # HSIC information bottleneck
-    lambda_align = 1e-2            # HSIC alignment
-    lambda_decorr = 1e-2           # HSIC decorrelation
+    lambda_align = 1e-2            # HSIC label alignment
+    lambda_decorr = 1e-2           # HSIC cross-AU decorrelation
     lambda_contrastive = 0.1       # Text-visual contrastive loss for AUs
     lambda_emo_contrastive = 0.1   # Text-visual contrastive loss for Emotions
+    lambda_facs_au = 0.1           # FACS anatomical rules on AU probabilities (XOR, subsume)
     
-    lambda_au_au = 1.0             # Phase 2: graph AU prediction
-    lambda_dag = 0.1               # DAG constraint on AU-AU graph
+    # Loss weights: Graph, Causal DAG & Counterfactual Reasoning (Phase 2 & 3)
+    lambda_au_au = 1.0             # Intermediate AU-AU graph classification loss
+    lambda_graph_au = 1.0          # Final Graph AU classification loss
+    lambda_graph_emo = 1.0         # Final Graph Emotion classification loss
+    lambda_dag = 0.1               # DAG constraint on AU-AU adjacency matrix
     lambda_causal_au = 0.1         # Causal structural rule on AU-AU graph
     lambda_causal_exp = 0.1        # Causal structural rule on AU-Exp graph
-    lambda_facs_au = 0.1           # FACS rules on AU-AU graph (XOR, subsume)
-    lambda_facs_exp = 0.1          # FACS emotion rules on AU-Exp graph loss
-    lambda_cf_important = 0.1      # counterfactual important perturbation
-    lambda_cf_unimportant = 0.1    # counterfactual unimportant perturbation
-    lambda_emotion = 0.1           # emotion weak supervision
-    lambda_au_au = 1.0             # intermediate AU-AU graph loss
-    lambda_graph_au = 1.0          # Graph AU classification loss
-    lambda_graph_emo = 1.0         # Graph Emotion classification loss
+    lambda_facs_exp = 0.1          # FACS emotion rules on AU-Exp graph
+    lambda_cf_important = 0.1      # Counterfactual important perturbation
+    lambda_cf_unimportant = 0.1    # Counterfactual unimportant perturbation
     
     # Training
     lr = 1e-5                      # Peak learning rate (Original repo used 1e-5)
