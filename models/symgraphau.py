@@ -205,20 +205,28 @@ def resnet50(pretrained=True, **kwargs):
     model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
     if pretrained:
         ckpt_path = os.path.join(models_dir, model_name['resnet50'])
-        try:
-            # PyTorch >=2.6: weights_only=True by default
-            state = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-        except TypeError:
-            # older torch (no weights_only param)
-            state = torch.load(ckpt_path, map_location='cpu')
-        # nếu file chứa 'state_dict'
-        if isinstance(state, dict) and 'state_dict' in state:
-            state = state['state_dict']
-        # xoá prefix 'module.' nếu có
-        from collections import OrderedDict
-        new_state = OrderedDict((k.replace('module.', ''), v) for k, v in state.items())
-        missing, unexpected = model.load_state_dict(new_state, strict=False)
-        print(f'[resnet50] loaded; missing={len(missing)} unexpected={len(unexpected)}')
+        if os.path.isfile(ckpt_path):
+            try:
+                # PyTorch >=2.6: weights_only=True by default
+                state = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+            except TypeError:
+                # older torch (no weights_only param)
+                state = torch.load(ckpt_path, map_location='cpu')
+            # nếu file chứa 'state_dict'
+            if isinstance(state, dict) and 'state_dict' in state:
+                state = state['state_dict']
+            # xoá prefix 'module.' nếu có
+            from collections import OrderedDict
+            new_state = OrderedDict((k.replace('module.', ''), v) for k, v in state.items())
+            missing, unexpected = model.load_state_dict(new_state, strict=False)
+            print(f'[resnet50] loaded from {ckpt_path}; missing={len(missing)} unexpected={len(unexpected)}')
+        else:
+            # Fallback: load torchvision pretrained weights
+            print(f'[resnet50] {ckpt_path} not found, loading torchvision pretrained weights...')
+            import torchvision.models as tv_models
+            tv_state = tv_models.resnet50(weights=tv_models.ResNet50_Weights.DEFAULT).state_dict()
+            missing, unexpected = model.load_state_dict(tv_state, strict=False)
+            print(f'[resnet50] torchvision loaded; missing={len(missing)} unexpected={len(unexpected)}')
     return model
 
 
