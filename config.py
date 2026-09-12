@@ -142,7 +142,7 @@ class ModelConfig:
     lambda_cf_unimportant = 0.1    # Counterfactual unimportant perturbation
     
     # Training
-    lr = 1e-5                      # Peak learning rate (Original repo used 1e-5)
+    lr = 0.0001                    # Peak learning rate (Original repo: 0.0001)
     weight_decay = 5e-4            # Weight decay for AdamW (Original repo used 5e-4)
     batch_size = 64
     num_epochs = 20

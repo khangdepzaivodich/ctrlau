@@ -1,7 +1,12 @@
 """
 Training script for CtrlAU.
+Matches original MultiviewSymAU training pipeline:
+  - Per-batch cosine annealing LR schedule
+  - No gradient clipping
+  - Resize(256) -> CenterCrop(224) + ColorJitter (train) / no jitter (val)
 """
 import os
+from math import cos, pi
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
@@ -10,13 +15,29 @@ from dataset import DISFADataset
 from models.ctrlau import CtrlAUModel
 
 
-def train_one_epoch(model, dataloader, optimizer, device, epoch):
+def adjust_learning_rate(optimizer, epoch, epochs, init_lr, iteration, num_iter):
+    """Per-batch cosine annealing LR schedule from MultiviewSymAU/utils.py."""
+    current_iter = iteration + epoch * num_iter
+    max_iter = epochs * num_iter
+    lr = init_lr * (1 + cos(pi * current_iter / max_iter)) / 2
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+
+def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None):
     """Train for one epoch."""
     model.train()
     running_losses = {}
     num_batches = 0
     
+    train_loader_len = len(dataloader)
+    
     for batch_idx, batch in enumerate(dataloader):
+        # Per-batch cosine annealing LR (exact match to original repo)
+        if cfg is not None:
+            adjust_learning_rate(optimizer, epoch - 1, cfg.num_epochs, cfg.lr,
+                                 batch_idx, train_loader_len)
+        
         images = batch["image"].to(device)
         au_labels = batch["au_labels"].to(device)
         
@@ -25,13 +46,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch):
         losses = outputs["losses"]
         total_loss = losses["total_loss"]
         
-        # Backward
+        # Backward (no gradient clipping, matching original repo)
         optimizer.zero_grad()
         total_loss.backward()
-        
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
         optimizer.step()
         
         # Accumulate losses
@@ -174,15 +191,16 @@ def main():
     print(f"Train subjects ({len(train_subjects)}): {train_subjects}")
     print(f"Val subjects ({len(val_subjects)}): {val_subjects}")
     
-    train_dataset = DISFADataset(data_root=args.data_root, subjects=train_subjects)
-    val_dataset = DISFADataset(data_root=args.data_root, subjects=val_subjects)
+    train_dataset = DISFADataset(data_root=args.data_root, subjects=train_subjects, train=True)
+    val_dataset = DISFADataset(data_root=args.data_root, subjects=val_subjects, train=False)
     
     print(f"Train samples: {len(train_dataset)}")
     print(f"Val samples: {len(val_dataset)}")
     
+    # DataLoader settings matching original repo (no drop_last)
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.batch_size,
-        shuffle=True, num_workers=4, pin_memory=True, drop_last=True,
+        shuffle=True, num_workers=4, pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=cfg.batch_size,
@@ -317,17 +335,18 @@ def main():
         else:
             print(f"Warning: Checkpoint file '{args.resume}' not found. Starting from scratch.")
 
-    # Optimizer
+    # Optimizer (matching original repo: AdamW with betas=(0.9, 0.999))
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=cfg.lr,
+        betas=(0.9, 0.999),
         weight_decay=cfg.weight_decay,
     )
     
-    # LR scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=cfg.num_epochs,
-    )
+    print(f"Initial learning rate: {cfg.lr}")
+    
+    # No epoch-level scheduler — LR is adjusted per-batch inside train_one_epoch
+    # using adjust_learning_rate() (cosine annealing matching original repo)
     
     # Training loop
     best_f1 = 0.0
@@ -336,13 +355,11 @@ def main():
         print(f"Epoch {epoch}/{cfg.num_epochs}")
         print(f"{'='*60}")
         
-        train_losses = train_one_epoch(model, train_loader, optimizer, device, epoch)
+        train_losses = train_one_epoch(model, train_loader, optimizer, device, epoch, cfg=cfg)
         
         # Evaluate
         print("Validation:")
         avg_f1 = evaluate(model, val_loader, device, phase=args.phase)
-        
-        scheduler.step()
         
         # Save checkpoint for this specific epoch
         epoch_ckpt_path = f"ctrlau_epoch_{epoch}.pth"

@@ -1,6 +1,7 @@
 """
 DISFA Dataset loader.
 Loads images and AU intensity labels (0-5 scale, binarized at threshold >= 2).
+Transforms match the original MultiviewSymAU repo exactly.
 """
 import os
 import torch
@@ -22,28 +23,40 @@ class DISFADataset(Dataset):
     We binarize: intensity >= 2 -> 1, else 0.
     """
     
-    def __init__(self, data_root, subjects=None, transform=None, intensity_threshold=2):
+    def __init__(self, data_root, subjects=None, transform=None, train=True, intensity_threshold=2):
         """
         Args:
             data_root: path to DISFA_Data directory
             subjects: list of subject IDs (e.g., ['SN001', 'SN002']). None = all.
-            transform: torchvision transforms for images
+            transform: torchvision transforms for images. If None, uses original repo defaults.
+            train: if True, use training transforms (with ColorJitter). If False, use val transforms.
             intensity_threshold: threshold for binarizing AU intensities
         """
         self.data_root = data_root
         self.img_root = os.path.join(data_root, "img")
         self.label_root = os.path.join(data_root, "ActionUnit_Labels")
         self.intensity_threshold = intensity_threshold
+        self.train = train
         
         if transform is None:
-            self.transform = transforms.Compose([
-                transforms.Resize((ModelConfig.img_size, ModelConfig.img_size)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
-                ),
-            ])
+            # Exact transforms from MultiviewSymAU/utils.py: image_train and image_test
+            if train:
+                self.transform = transforms.Compose([
+                    transforms.Resize(256),
+                    transforms.CenterCrop(224),
+                    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225]),
+                ])
+            else:
+                self.transform = transforms.Compose([
+                    transforms.Resize(256),
+                    transforms.CenterCrop(224),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225]),
+                ])
         else:
             self.transform = transform
         
@@ -155,4 +168,3 @@ class DISFADataset(Dataset):
         raw_weights = 1.0 / occur_rates_clamped
         normalized_weights = raw_weights / raw_weights.sum() * len(DISFA_AUS)
         return normalized_weights, occur_rates
-
