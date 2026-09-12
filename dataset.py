@@ -43,7 +43,8 @@ class DISFADataset(Dataset):
             if train:
                 self.transform = transforms.Compose([
                     transforms.Resize(256),
-                    transforms.CenterCrop(224),
+                    transforms.RandomCrop(224),
+                    transforms.RandomHorizontalFlip(p=0.5),
                     transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0),
                     transforms.ToTensor(),
                     transforms.Normalize(mean=[0.485, 0.456, 0.406],

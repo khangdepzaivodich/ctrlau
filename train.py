@@ -15,13 +15,14 @@ from dataset import DISFADataset
 from models.ctrlau import CtrlAUModel
 
 
-def adjust_learning_rate(optimizer, epoch, epochs, init_lr, iteration, num_iter):
-    """Per-batch cosine annealing LR schedule from MultiviewSymAU/utils.py."""
+def adjust_learning_rate(optimizer, epoch, epochs, iteration, num_iter):
+    """Per-batch cosine annealing LR schedule scaling each param group from its initial_lr."""
     current_iter = iteration + epoch * num_iter
     max_iter = epochs * num_iter
-    lr = init_lr * (1 + cos(pi * current_iter / max_iter)) / 2
+    decay = (1 + cos(pi * current_iter / max_iter)) / 2
     for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+        init_lr = param_group.get("initial_lr", param_group["lr"])
+        param_group["lr"] = init_lr * decay
 
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None):
@@ -33,9 +34,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None):
     train_loader_len = len(dataloader)
     
     for batch_idx, batch in enumerate(dataloader):
-        # Per-batch cosine annealing LR (exact match to original repo)
+        # Per-batch cosine annealing LR
         if cfg is not None:
-            adjust_learning_rate(optimizer, epoch - 1, cfg.num_epochs, cfg.lr,
+            adjust_learning_rate(optimizer, epoch - 1, cfg.num_epochs,
                                  batch_idx, train_loader_len)
         
         images = batch["image"].to(device)
@@ -165,6 +166,24 @@ def main():
         default="symgraphau",
         choices=["symgraphau", "ctrlau"],
         help="Model architecture: 'symgraphau' (MultiviewSymAU Phase 1) or 'ctrlau' (Upgraded CtrlAU)"
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Uniform learning rate. If specified, overrides differential learning rate.",
+    )
+    parser.add_argument(
+        "--lr_backbone",
+        type=float,
+        default=1e-5,
+        help="Learning rate for pretrained backbone (default: 1e-5 to prevent identity overfitting)",
+    )
+    parser.add_argument(
+        "--lr_head",
+        type=float,
+        default=1e-4,
+        help="Learning rate for classification heads (default: 1e-4)",
     )
     args = parser.parse_args()
 
@@ -322,7 +341,8 @@ def main():
             param.requires_grad = True
         for param in model.text_encoder.parameters():
             param.requires_grad = False # keep CLIP frozen
-        cfg.lr = 1e-5
+        args.lr_backbone = 1e-5
+        args.lr_head = 1e-5
         
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
@@ -335,15 +355,46 @@ def main():
         else:
             print(f"Warning: Checkpoint file '{args.resume}' not found. Starting from scratch.")
 
-    # Optimizer (matching original repo: AdamW with betas=(0.9, 0.999))
+    # Optimizer with Differential Learning Rate
+    # Separates pretrained backbone from classification heads to prevent identity overfitting
+    backbone_params = []
+    head_params = []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if "backbone" in name:
+            backbone_params.append(p)
+        else:
+            head_params.append(p)
+
+    init_lr_bb = args.lr if args.lr is not None else args.lr_backbone
+    init_lr_hd = args.lr if args.lr is not None else args.lr_head
+
+    param_groups = []
+    if backbone_params:
+        param_groups.append({
+            "params": backbone_params,
+            "lr": init_lr_bb,
+            "initial_lr": init_lr_bb,
+            "name": "backbone",
+        })
+    if head_params:
+        param_groups.append({
+            "params": head_params,
+            "lr": init_lr_hd,
+            "initial_lr": init_lr_hd,
+            "name": "heads",
+        })
+
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=cfg.lr,
+        param_groups,
         betas=(0.9, 0.999),
         weight_decay=cfg.weight_decay,
     )
     
-    print(f"Initial learning rate: {cfg.lr}")
+    print("Initial learning rates:")
+    for pg in optimizer.param_groups:
+        print(f"  {pg['name']}: {pg['lr']:.2e}")
     
     # No epoch-level scheduler — LR is adjusted per-batch inside train_one_epoch
     # using adjust_learning_rate() (cosine annealing matching original repo)

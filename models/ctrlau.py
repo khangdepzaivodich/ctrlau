@@ -90,7 +90,6 @@ class CtrlAUModel(nn.Module):
             in_channels=mid_channels,
             num_aus=NUM_AUS,
             hid_channels=mid_channels,
-            emb_channels=EMB_DIM,
         )
         
         # MultiviewSymAU Stage 1 7-branch Emotion Head
@@ -98,7 +97,6 @@ class CtrlAUModel(nn.Module):
             in_channels=mid_channels,
             num_expr=self.num_emotions,
             hid_channels=mid_channels,
-            emb_channels=EMB_DIM,
         )
         
         self.graph_module = AUGraphModule(
