@@ -343,12 +343,14 @@ class AUHead(nn.Module):
     def __init__(self,
                  in_channels: int,
                  num_aus: int,
-                 hid_channels: int):
+                 hid_channels: int,
+                 dropout: float = 0.2):
         super().__init__()
         self.in_channels  = in_channels
         self.num_aus      = num_aus
         self.hid_channels = hid_channels
         self.emb_channels = EMB_DIM
+        self.dropout      = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         # Mỗi AU có 1 Conv1DExtractor riêng
         self.extractors = nn.ModuleList([
@@ -376,8 +378,8 @@ class AUHead(nn.Module):
         # Lặp từng AU extractor
         for i in range(self.num_aus):
             emb_i = self.extractors[i](x)          # (B, EMB_DIM)
-            emb_list.append(emb_i.unsqueeze(1))    # (B, 1, EMB_DIM)
-            logit_i = self.classifiers[i](emb_i)   # (B, 1)
+            emb_list.append(emb_i.unsqueeze(1))    # (B, 1, EMB_DIM) - UNTOUCHED embedding
+            logit_i = self.classifiers[i](self.dropout(emb_i))   # (B, 1) - with dropout regularization
             logit_list.append(logit_i)
 
         # Ghép các AU lại
@@ -406,12 +408,14 @@ class ExprHead(nn.Module):
     def __init__(self,
                  in_channels: int,
                  num_expr: int,
-                 hid_channels: int):
+                 hid_channels: int,
+                 dropout: float = 0.2):
         super().__init__()
         self.in_channels  = in_channels
         self.num_expr     = num_expr
         self.hid_channels = hid_channels
         self.emb_channels = EMB_DIM
+        self.dropout      = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         self.extractors = nn.ModuleList([
             Conv1DExtractor(
@@ -436,8 +440,8 @@ class ExprHead(nn.Module):
 
         for i in range(self.num_expr):
             emb_i = self.extractors[i](x)          # (B, EMB_DIM)
-            emb_list.append(emb_i.unsqueeze(1))    # (B, 1, EMB_DIM)
-            logit_i = self.classifiers[i](emb_i)   # (B, 1)
+            emb_list.append(emb_i.unsqueeze(1))    # (B, 1, EMB_DIM) - UNTOUCHED embedding
+            logit_i = self.classifiers[i](self.dropout(emb_i))   # (B, 1) - with dropout regularization
             logit_list.append(logit_i)
 
         V_e    = torch.cat(emb_list, dim=1)        # (B, N_e, EMB_DIM)
@@ -466,7 +470,8 @@ class MEFARGStage1(nn.Module):
     def __init__(self,
                  num_aus: int = 8,
                  num_expr: int = 7,
-                 backbone: str = 'swin_transformer_base'):
+                 backbone: str = 'swin_transformer_base',
+                 dropout: float = 0.2):
         super().__init__()
 
         # ---------------- Backbone ----------------
@@ -511,12 +516,14 @@ class MEFARGStage1(nn.Module):
         self.au_head = AUHead(
             in_channels=self.mid_channels,
             num_aus=num_aus,
-            hid_channels=self.mid_channels
+            hid_channels=self.mid_channels,
+            dropout=dropout,
         )
         self.expr_head = ExprHead(
             in_channels=self.mid_channels,
             num_expr=num_expr,
-            hid_channels=self.mid_channels
+            hid_channels=self.mid_channels,
+            dropout=dropout,
         )
 
     def forward(self, x):
@@ -699,7 +706,13 @@ class SymGraphAUModel(nn.Module):
         self.num_emotions = NUM_SYM_EMOTIONS
 
         # The exact Stage 1 architecture
-        self.stage1 = MEFARGStage1(num_aus=self.num_aus, num_expr=self.num_emotions, backbone='resnet50')
+        dropout = getattr(self.cfg, "classifier_dropout", 0.2)
+        self.stage1 = MEFARGStage1(
+            num_aus=self.num_aus,
+            num_expr=self.num_emotions,
+            backbone='resnet50',
+            dropout=dropout
+        )
 
         # Expose submodules for compatibility
         self.backbone = self.stage1.backbone

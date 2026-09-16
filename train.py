@@ -185,11 +185,19 @@ def main():
         default=1e-4,
         help="Learning rate for classification heads (default: 1e-4)",
     )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.2,
+        help="Dropout rate before AU and Emotion classifiers (default: 0.2)",
+    )
     args = parser.parse_args()
 
     cfg = ModelConfig()
+    cfg.classifier_dropout = args.dropout
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"Classifier Dropout: {cfg.classifier_dropout}")
     
     # Exact DISFA 3-Fold Splits from MultiviewSymAU
     group_1 = ["SN002", "SN010", "SN001", "SN026", "SN027", "SN032", "SN030", "SN009", "SN016"]

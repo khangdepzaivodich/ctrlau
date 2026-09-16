@@ -62,6 +62,7 @@ class CtrlAUModel(nn.Module):
             cfg = ModelConfig()
         self.cfg = cfg
         self.phase = getattr(cfg, "phase", 1)
+        self.num_aus = NUM_AUS
         self.num_emotions = NUM_SYM_EMOTIONS
         
         # Prior AU-Expression Matrix from MultiviewSymAU
@@ -86,10 +87,12 @@ class CtrlAUModel(nn.Module):
         )
         
         # MultiviewSymAU Stage 1 8-branch AU Head
+        dropout = getattr(cfg, "classifier_dropout", 0.2)
         self.au_head = SymAUHead(
             in_channels=mid_channels,
             num_aus=NUM_AUS,
             hid_channels=mid_channels,
+            dropout=dropout,
         )
         
         # MultiviewSymAU Stage 1 7-branch Emotion Head
@@ -97,6 +100,7 @@ class CtrlAUModel(nn.Module):
             in_channels=mid_channels,
             num_expr=self.num_emotions,
             hid_channels=mid_channels,
+            dropout=dropout,
         )
         
         self.graph_module = AUGraphModule(
@@ -339,18 +343,20 @@ class CtrlAUModel(nn.Module):
         # ============================================================
         # 3. AU Head (8 branches -> V_a and p_a)
         # ============================================================
-        au_embeddings, au_logits, au_probs = self.au_head(feat)
-        # au_embeddings: list of 8 tensors, each (B, 256)
-        # au_logits: (B, 8)
+        V_a, au_probs = self.au_head(feat)
+        # V_a: (B, 8, 256)
         # au_probs: (B, 8)
+        au_embeddings = [V_a[:, i, :] for i in range(self.num_aus)]
+        au_logits = torch.logit(au_probs.clamp(1e-6, 1.0 - 1e-6))
         
         # ============================================================
         # 4. Expression Head (7 branches -> V_e and p_e)
         # ============================================================
-        emotion_embed_list, emotion_logits, emotion_probs = self.emotion_head(feat)
-        # emotion_embed_list: list of 7 tensors, each (B, 256)
-        # emotion_logits: (B, 7)
+        V_e, emotion_probs = self.emotion_head(feat)
+        # V_e: (B, 7, 256)
         # emotion_probs: (B, 7)
+        emotion_embed_list = [V_e[:, i, :] for i in range(self.num_emotions)]
+        emotion_logits = torch.logit(emotion_probs.clamp(1e-6, 1.0 - 1e-6))
         
         # ============================================================
         # Phase 1 Losses: MultiviewSymAU Backbone + CtrlAU Regularizations
