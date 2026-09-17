@@ -39,15 +39,14 @@ def test_symgraphau():
     loss.backward()
     print("Backward pass successful!")
     
-    # Verify only backbone, global_linear, au_head, emotion_head got gradients
-    assert model.backbone.features[0].weight.grad is not None
+    assert model.backbone.conv1.weight.grad is not None
     assert model.global_linear.fc.weight.grad is not None
     assert model.au_head.extractors[0].conv1.weight.grad is not None
     assert model.emotion_head.extractors[0].conv1.weight.grad is not None
-    # Verify graph module did NOT get gradients
-    for p in model.graph_module.parameters():
-        assert p.grad is None
-    print("Gradients verified: Backbone and CNN heads updated, Graph module untouched!")
+    if hasattr(model, "graph_module"):
+        for p in model.graph_module.parameters():
+            assert p.grad is None
+    print("Gradients verified: Backbone and CNN heads updated!")
     
     # 2. Test Phase 1 Eval (Inference mode)
     print("\n--- Test Phase 1 Inference ---")

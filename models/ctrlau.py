@@ -87,12 +87,10 @@ class CtrlAUModel(nn.Module):
         )
         
         # MultiviewSymAU Stage 1 8-branch AU Head
-        dropout = getattr(cfg, "classifier_dropout", 0.2)
         self.au_head = SymAUHead(
             in_channels=mid_channels,
             num_aus=NUM_AUS,
             hid_channels=mid_channels,
-            dropout=dropout,
         )
         
         # MultiviewSymAU Stage 1 7-branch Emotion Head
@@ -100,7 +98,6 @@ class CtrlAUModel(nn.Module):
             in_channels=mid_channels,
             num_expr=self.num_emotions,
             hid_channels=mid_channels,
-            dropout=dropout,
         )
         
         self.graph_module = AUGraphModule(

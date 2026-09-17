@@ -34,8 +34,7 @@ def test_forward_backward():
     print(f"   AU labels shape: {au_labels.shape}")
     
     print("\n3. Forward pass...")
-    model.train()
-    outputs = model(images, au_labels=au_labels)
+    outputs = model(images, au_labels=au_labels, phase=3)
     
     print(f"   au_logits: {outputs['au_logits'].shape}")
     print(f"   au_probs: {outputs['au_probs'].shape}")

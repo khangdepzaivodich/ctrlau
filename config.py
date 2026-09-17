@@ -120,8 +120,6 @@ class ModelConfig:
     # Counterfactual perturbation
     noise_std = 0.1                # Gaussian noise std for perturbation
     
-    # Regularization
-    classifier_dropout = 0.2       # Dropout rate on embeddings before AU/Emotion classifiers to prevent memorization
     
     # Loss weights: Feature Extraction & Regularizers (Phase 1, 2, 3)
     lambda_au = 1.0                # Base AU Weighted Asymmetric Loss
