@@ -214,11 +214,19 @@ def main():
     print(f"Train subjects ({len(train_subjects)}): {train_subjects}")
     print(f"Val subjects ({len(val_subjects)}): {val_subjects}")
     
-    train_dataset = DISFADataset(data_root=args.data_root, subjects=train_subjects, train=True)
-    val_dataset = DISFADataset(data_root=args.data_root, subjects=val_subjects, train=False)
+    train_dataset = DISFADataset(data_root=args.data_root, subjects=train_subjects, train=True, fold=args.fold)
+    val_dataset = DISFADataset(data_root=args.data_root, subjects=val_subjects, train=False, fold=args.fold)
     
     print(f"Train samples: {len(train_dataset)}")
-    print(f"Val samples: {len(val_dataset)}")
+    print(f"Val samples:   {len(val_dataset)}")
+    
+    if len(train_dataset) == 0 or len(val_dataset) == 0:
+        raise ValueError(
+            f"Dataset is empty! Found {len(train_dataset)} train samples and {len(val_dataset)} val samples.\n"
+            f"Please check that --data_root points to the DISFA directory containing either:\n"
+            f"  1) 'list/' (with DISFA_train_..._fold{args.fold}.txt) and 'img/' folder, OR\n"
+            f"  2) 'ActionUnit_Labels/' and 'img/' folders."
+        )
     
     # DataLoader settings matching original repo (no drop_last)
     train_loader = DataLoader(
@@ -245,7 +253,12 @@ def main():
     # Prior AU Class Weights (Fold-Specific Inverse Frequencies)
     # ------------------------------------------------------------
     loaded = False
+    resolved_root = getattr(train_dataset, "data_root", args.data_root)
     weight_file_candidates = [
+        os.path.join(resolved_root, "list", f"DISFA_train_weight_fold{args.fold}.txt"),
+        os.path.join(resolved_root, "list", f"DISFA_weight_fold{args.fold}.txt"),
+        os.path.join(resolved_root, f"DISFA_train_weight_fold{args.fold}.txt"),
+        os.path.join(resolved_root, f"DISFA_weight_fold{args.fold}.txt"),
         os.path.join(args.data_root, "list", f"DISFA_train_weight_fold{args.fold}.txt"),
         os.path.join(args.data_root, "list", f"DISFA_weight_fold{args.fold}.txt"),
         os.path.join(args.data_root, f"DISFA_train_weight_fold{args.fold}.txt"),
