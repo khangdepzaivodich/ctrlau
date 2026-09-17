@@ -204,8 +204,13 @@ def resnet50(pretrained=True, **kwargs):
     """Constructs a ResNet-50 model."""
     model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
     if pretrained:
-        ckpt_path = os.path.join(models_dir, model_name['resnet50'])
-        if os.path.isfile(ckpt_path):
+        candidates = [
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'checkpoints', model_name['resnet50']),
+            os.path.join('checkpoints', model_name['resnet50']),
+            os.path.join(models_dir, model_name['resnet50']),
+        ]
+        ckpt_path = next((p for p in candidates if os.path.isfile(p)), None)
+        if ckpt_path:
             try:
                 # PyTorch >=2.6: weights_only=True by default
                 state = torch.load(ckpt_path, map_location='cpu', weights_only=False)
@@ -219,14 +224,14 @@ def resnet50(pretrained=True, **kwargs):
             from collections import OrderedDict
             new_state = OrderedDict((k.replace('module.', ''), v) for k, v in state.items())
             missing, unexpected = model.load_state_dict(new_state, strict=False)
-            print(f'[resnet50] loaded from {ckpt_path}; missing={len(missing)} unexpected={len(unexpected)}')
+            print(f'[resnet50] loaded exact checkpoint from {ckpt_path}; missing={len(missing)} unexpected={len(unexpected)}')
         else:
-            # Fallback: load torchvision pretrained weights
-            print(f'[resnet50] {ckpt_path} not found, loading torchvision pretrained weights...')
+            # Fallback: load torchvision pretrained ImageNet V1 weights (exact resnet50-19c8e357)
+            print(f'[resnet50] local checkpoint not found, loading torchvision ImageNet V1 weights...')
             import torchvision.models as tv_models
-            tv_state = tv_models.resnet50(weights=tv_models.ResNet50_Weights.DEFAULT).state_dict()
+            tv_state = tv_models.resnet50(weights=tv_models.ResNet50_Weights.IMAGENET1K_V1).state_dict()
             missing, unexpected = model.load_state_dict(tv_state, strict=False)
-            print(f'[resnet50] torchvision loaded; missing={len(missing)} unexpected={len(unexpected)}')
+            print(f'[resnet50] torchvision ImageNet V1 loaded; missing={len(missing)} unexpected={len(unexpected)}')
     return model
 
 
