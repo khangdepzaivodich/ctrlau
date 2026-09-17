@@ -172,12 +172,28 @@ def main():
         default=1e-4,
         help="Learning rate (default: 1e-4, as in original SymGraphAU)",
     )
+    parser.add_argument(
+        "-b", "--batch_size",
+        type=int,
+        default=64,
+        help="Batch size (default: 64)",
+    )
+    parser.add_argument(
+        "-e", "--epochs",
+        type=int,
+        default=20,
+        help="Number of epochs (default: 20)",
+    )
     args = parser.parse_args()
 
     cfg = ModelConfig()
+    cfg.batch_size = args.batch_size
+    cfg.num_epochs = args.epochs
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    print(f"Learning rate: {args.lr}")
+    print(f"Model: {args.model}, Phase: {args.phase}, Fold: {args.fold}")
+    print(f"Learning rate: {args.lr}, Batch size: {cfg.batch_size}, Epochs: {cfg.num_epochs}")
     
     # Exact DISFA 3-Fold Splits from MultiviewSymAU
     group_1 = ["SN002", "SN010", "SN001", "SN026", "SN027", "SN032", "SN030", "SN009", "SN016"]
