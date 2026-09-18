@@ -7,6 +7,7 @@ Matches original MultiviewSymAU training pipeline:
 """
 import os
 import random
+import argparse
 from math import cos, pi
 import numpy as np
 import torch
@@ -129,10 +130,6 @@ def evaluate(model, dataloader, device, phase=1):
     print(f"  Average F1: {avg_f1:.4f}")
     
     return avg_f1
-
-
-import argparse
-
 def main():
     parser = argparse.ArgumentParser(description="Train CtrlAU Model")
     parser.add_argument(
@@ -283,7 +280,6 @@ def main():
     ]
     for w_path in weight_file_candidates:
         if os.path.isfile(w_path):
-            import numpy as np
             print(f"Loading AU class weights for Fold {args.fold} from: {w_path}")
             loaded_weights = torch.from_numpy(np.loadtxt(w_path)).float().to(device)
             if hasattr(model, "update_class_weights"):
