@@ -6,7 +6,9 @@ Matches original MultiviewSymAU training pipeline:
   - Resize(256) -> CenterCrop(224) + ColorJitter (train) / no jitter (val)
 """
 import os
+import random
 from math import cos, pi
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
@@ -167,16 +169,16 @@ def main():
         help="Model architecture: 'symgraphau' (MultiviewSymAU Phase 1) or 'ctrlau' (Upgraded CtrlAU)"
     )
     parser.add_argument(
-        "--lr",
+        "--lr", "-lr",
         type=float,
         default=1e-4,
-        help="Learning rate (default: 1e-4, as in original SymGraphAU)",
+        help="Learning rate (default: 1e-4 for Phase 1, as in ynhi's run.txt)",
     )
     parser.add_argument(
         "-b", "--batch_size",
         type=int,
         default=64,
-        help="Batch size (default: 64)",
+        help="Batch size (default: 64, matching ynhi's original)",
     )
     parser.add_argument(
         "-e", "--epochs",
@@ -184,16 +186,31 @@ def main():
         default=20,
         help="Number of epochs (default: 20)",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for reproducibility (default: 0, matching ynhi's conf.py)",
+    )
     args = parser.parse_args()
 
     cfg = ModelConfig()
     cfg.batch_size = args.batch_size
     cfg.num_epochs = args.epochs
 
+    # ---- Seeding (identical to ynhi's conf.py set_env) ----
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     print(f"Model: {args.model}, Phase: {args.phase}, Fold: {args.fold}")
-    print(f"Learning rate: {args.lr}, Batch size: {cfg.batch_size}, Epochs: {cfg.num_epochs}")
+    print(f"Learning rate: {args.lr}, Batch size: {cfg.batch_size}, Epochs: {cfg.num_epochs}, Seed: {args.seed}")
     
     # Exact DISFA 3-Fold Splits from MultiviewSymAU
     group_1 = ["SN002", "SN010", "SN001", "SN026", "SN027", "SN032", "SN030", "SN009", "SN016"]
