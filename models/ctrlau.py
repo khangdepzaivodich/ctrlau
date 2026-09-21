@@ -20,13 +20,13 @@ from losses import (
     ViolationLoss, FACSEmotionViolationLoss, CounterfactualLoss, FocalLoss,
     FACSAUViolationLoss, WeightedAsymmetricLoss, ExpressionBCELoss
 )
-from .backbone import VisualBackbone
 from .text_encoder import TextEncoder
 from .gat import AUGraphModule
 from .masks import MaskModule
 from .symgraphau import (
-    LinearBlock, Conv1DExtractor, SymAUHead, SymExprHead,
-    M_AE_DISFA, SYM_EMOTIONS, NUM_SYM_EMOTIONS, EMB_DIM
+    LinearBlock, SymAUHead, SymExprHead,
+    M_AE_DISFA, SYM_EMOTIONS, NUM_SYM_EMOTIONS, EMB_DIM,
+    resnet50
 )
 
 
@@ -68,12 +68,8 @@ class CtrlAUModel(nn.Module):
         # Prior AU-Expression Matrix from MultiviewSymAU
         self.register_buffer("M_AE", M_AE_DISFA)
         
-        # ---- Modules ----
-        self.backbone = VisualBackbone(
-            name=cfg.backbone,
-            feat_dim=cfg.backbone_feat_dim,
-            pretrained=True,
-        )
+        # MultiviewSymAU Stage 1 ResNet-50 Backbone (ImageNet V1 / resnet50-19c8e357)
+        self.backbone = resnet50(pretrained=True)
         
         # MultiviewSymAU Stage 1 Shared Linear Projection (2048 -> 512)
         mid_channels = cfg.backbone_feat_dim // 4  # 2048 // 4 = 512
@@ -327,10 +323,10 @@ class CtrlAUModel(nn.Module):
         B = images.size(0)
         
         # ============================================================
-        # 1. Visual Backbone (ResNet-50) -> (B, 49, 2048)
+        # 1. Visual Backbone (ResNet-50 from MultiviewSymAU) -> (B, 49, 2048)
         # ============================================================
-        z_img = self.backbone(images)  # (B, 2048, 49)
-        feat = z_img.permute(0, 2, 1)  # (B, 49, 2048)
+        feat = self.backbone(images)   # (B, 49, 2048)
+        z_img = feat.permute(0, 2, 1)  # (B, 2048, 49) sequence of spatial patches
         
         # ============================================================
         # 2. Global Linear (LinearBlock 2048 -> 512)
