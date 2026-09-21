@@ -311,14 +311,13 @@ def main():
         if args.model == "ctrlau":
             print("CtrlAU Method: Combining SymGraphAU Backbone with Phase 1 Regularizers:")
             print("  - HSIC Disentanglement (L_ib, L_align, L_decorr)")
-            print("  - CLIP Text-Visual Contrastive Alignment (AUs & Emotions)")
-            print("  - FACS AU Violation Loss (on CNN AU probabilities)")
+            print("  - CLIP Text-Visual Contrastive Alignment (on active y=1 samples)")
             model.cfg.lambda_ib = 1e-2
             model.cfg.lambda_align = 1e-2
             model.cfg.lambda_decorr = 1e-2
-            model.cfg.lambda_contrastive = 0.1
-            model.cfg.lambda_emo_contrastive = 0.1
-            model.cfg.lambda_facs_au = 0.1
+            model.cfg.lambda_contrastive = 0.05
+            model.cfg.lambda_emo_contrastive = 0.05
+            model.cfg.lambda_facs_au = 0.0
         else:
             print("Pure SymGraphAU: MultiviewSymAU Stage 1 Baseline (No Phase 1 regularizers)")
             model.cfg.lambda_ib = 0.0

@@ -127,9 +127,9 @@ class ModelConfig:
     lambda_ib = 1e-2               # HSIC information bottleneck
     lambda_align = 1e-2            # HSIC label alignment
     lambda_decorr = 1e-2           # HSIC cross-AU decorrelation
-    lambda_contrastive = 0.1       # Text-visual contrastive loss for AUs
-    lambda_emo_contrastive = 0.1   # Text-visual contrastive loss for Emotions
-    lambda_facs_au = 0.1           # FACS anatomical rules on AU probabilities (XOR, subsume)
+    lambda_contrastive = 0.05      # Text-visual contrastive loss for AUs (masked to y=1)
+    lambda_emo_contrastive = 0.05  # Text-visual contrastive loss for Emotions (masked to y=1)
+    lambda_facs_au = 0.0           # FACS anatomical rules on AU probabilities (disabled for DISFA)
     
     # Loss weights: Graph, Causal DAG & Counterfactual Reasoning (Phase 2 & 3)
     lambda_au_au = 1.0             # Intermediate AU-AU graph classification loss

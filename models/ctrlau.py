@@ -385,24 +385,45 @@ class CtrlAUModel(nn.Module):
                 losses["loss_align"] = l_align
                 losses["loss_decorr"] = l_decorr
                 
-                # 2. Text-Visual Contrastive Alignment (AUs)
+                # 2. Text-Visual Contrastive Alignment (AUs) - ONLY on samples where AU is actually present (y == 1)
                 text_emb = self._get_text_embeddings(device=device)
-                au_emb_mean = torch.stack([e.mean(dim=0) for e in au_embeddings])
-                visual_proj = self.visual_proj(au_emb_mean)
-                text_proj = self.text_proj(text_emb)
-                loss_contrastive = self.contrastive_loss(visual_proj, text_proj)
+                active_au_vis = []
+                active_au_txt = []
+                for i in range(self.num_aus):
+                    pos_mask = (au_labels[:, i] == 1)
+                    if pos_mask.sum() > 0:
+                        pos_mean = au_embeddings[i][pos_mask].mean(dim=0)
+                        active_au_vis.append(pos_mean)
+                        active_au_txt.append(text_emb[i])
+                
+                if len(active_au_vis) >= 2:
+                    visual_proj = self.visual_proj(torch.stack(active_au_vis))
+                    text_proj = self.text_proj(torch.stack(active_au_txt))
+                    loss_contrastive = self.contrastive_loss(visual_proj, text_proj)
+                else:
+                    loss_contrastive = torch.tensor(0.0, device=device)
                 losses["loss_contrastive"] = loss_contrastive
                 
-                # 3. Text-Visual Contrastive Alignment (Emotions)
+                # 3. Text-Visual Contrastive Alignment (Emotions) - ONLY on samples where Emotion pseudo-label is present (y == 1)
                 emo_text_emb = self._get_emotion_text_embeddings(device=device)
-                emotion_emb_stacked = torch.stack(emotion_embed_list, dim=1) # (B, 7, 256)
-                emo_emb_mean = emotion_emb_stacked.mean(dim=0) # (7, 256)
-                emo_visual_proj = self.emotion_visual_proj(emo_emb_mean)
-                emo_text_proj = self.emotion_text_proj(emo_text_emb)
-                loss_emo_contrastive = self.contrastive_loss(emo_visual_proj, emo_text_proj)
+                active_emo_vis = []
+                active_emo_txt = []
+                for k in range(self.num_emotions):
+                    emo_pos_mask = (emotion_pseudo[:, k] == 1)
+                    if emo_pos_mask.sum() > 0:
+                        emo_pos_mean = emotion_embed_list[k][emo_pos_mask].mean(dim=0)
+                        active_emo_vis.append(emo_pos_mean)
+                        active_emo_txt.append(emo_text_emb[k])
+                
+                if len(active_emo_vis) >= 2:
+                    emo_visual_proj = self.emotion_visual_proj(torch.stack(active_emo_vis))
+                    emo_text_proj = self.emotion_text_proj(torch.stack(active_emo_txt))
+                    loss_emo_contrastive = self.contrastive_loss(emo_visual_proj, emo_text_proj)
+                else:
+                    loss_emo_contrastive = torch.tensor(0.0, device=device)
                 losses["loss_emo_contrastive"] = loss_emo_contrastive
                 
-                # 4. FACS AU Violation Loss (on CNN AU probabilities)
+                # 4. FACS AU Violation Loss (Noisy contradictory rules disabled for DISFA)
                 loss_facs_au = self.facs_au_violation_loss(au_probs)
                 losses["loss_facs_au"] = loss_facs_au
                 
