@@ -372,7 +372,7 @@ class CtrlAUModel(nn.Module):
             losses["loss_emotion"] = loss_we
             
             # (3) Joint Feature Learning (JFL) Phase 1 Base Loss: L_jf = L_wa + gamma * L_we
-            gamma_emo = 0.05 if self.cfg.lambda_emotion == 0.1 else self.cfg.lambda_emotion
+            gamma_emo = getattr(self.cfg, "lambda_emotion", 0.05)
             loss_phase1 = loss_wa + gamma_emo * loss_we
             losses["loss_phase1"] = loss_phase1
             
@@ -474,8 +474,8 @@ class CtrlAUModel(nn.Module):
         au_au_logits = torch.cat(au_au_logits, dim=1)
         au_au_probs = torch.sigmoid(au_au_logits)
         
-        # AU-Expression graph
-        updated_nodes, au_exp_adj = self.graph_module.forward_au_exp(au_emb_stacked, emotion_emb_stacked)
+        # AU-Expression graph: Hierarchical cascade (takes updated_au from AU-AU graph)
+        updated_nodes, au_exp_adj = self.graph_module.forward_au_exp(updated_au, emotion_emb_stacked)
         updated_au_final = updated_nodes[:, :NUM_AUS, :]
         updated_emo_final = updated_nodes[:, NUM_AUS:, :]
         
@@ -499,12 +499,12 @@ class CtrlAUModel(nn.Module):
         # Losses for Phase 2 / Phase 3 (Graph Learning & Causal Interventions)
         # ============================================================
         if au_labels is not None:
-            # 1. AU-AU intermediate graph prediction loss
-            loss_au_au = self.au_bce_loss(au_au_logits, au_labels)
+            # 1. AU-AU intermediate graph prediction loss (Weighted Asymmetric Loss)
+            loss_au_au = self.wal_loss(au_au_probs, au_labels.float())
             losses["loss_au_au"] = loss_au_au
             
             # 2. Final Graph AU & Emotion prediction losses
-            loss_graph_au = self.au_bce_loss(graph_au_logits, au_labels)
+            loss_graph_au = self.wal_loss(graph_au_probs, au_labels.float())
             losses["loss_graph_au"] = loss_graph_au
             
             loss_graph_emo = self.expression_bce_loss(graph_emo_probs, emotion_pseudo)
@@ -538,11 +538,11 @@ class CtrlAUModel(nn.Module):
             cf_mask = (cf_importance > self.cf_threshold).float()
             sparsity_scale = (self.au_pos_weights / self.au_pos_weights.mean()).view(1, -1, 1)
             
-            noise_imp = torch.randn_like(au_emb_stacked) * (self.cfg.noise_std * sparsity_scale)
-            au_embeddings_imp = au_emb_stacked + noise_imp * cf_mask.view(1, -1, 1)
+            noise_imp = torch.randn_like(updated_au) * (self.cfg.noise_std * sparsity_scale)
+            au_embeddings_imp = updated_au + noise_imp * cf_mask.view(1, -1, 1)
             
-            noise_unimp = torch.randn_like(au_emb_stacked) * (self.cfg.noise_std * sparsity_scale)
-            au_embeddings_unimp = au_emb_stacked + noise_unimp * (1.0 - cf_mask.view(1, -1, 1))
+            noise_unimp = torch.randn_like(updated_au) * (self.cfg.noise_std * sparsity_scale)
+            au_embeddings_unimp = updated_au + noise_unimp * (1.0 - cf_mask.view(1, -1, 1))
             
             updated_nodes_imp, _ = self.graph_module.forward_au_exp(au_embeddings_imp, emotion_emb_stacked)
             updated_au_imp = updated_nodes_imp[:, :NUM_AUS, :]
