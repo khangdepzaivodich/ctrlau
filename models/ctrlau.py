@@ -497,9 +497,16 @@ class CtrlAUModel(nn.Module):
         
         # Losses for Phase 2 / Phase 3
         if au_labels is not None:
-            # HSIC Disentanglement
-            z_img_global = z_img.mean(dim=2)
-            l_ib, l_align, l_decorr = self.hsic_loss(au_embeddings, z_img_global, au_labels)
+            # HSIC Disentanglement (optional in Phase 2/3)
+            if (getattr(self.cfg, "lambda_ib", 0) > 0 or 
+                getattr(self.cfg, "lambda_align", 0) > 0 or 
+                getattr(self.cfg, "lambda_decorr", 0) > 0):
+                z_img_global = z_img.mean(dim=2)
+                l_ib, l_align, l_decorr = self.hsic_loss(au_embeddings, z_img_global, au_labels)
+            else:
+                l_ib = torch.tensor(0.0, device=device)
+                l_align = torch.tensor(0.0, device=device)
+                l_decorr = torch.tensor(0.0, device=device)
             losses["loss_ib"] = l_ib
             losses["loss_align"] = l_align
             losses["loss_decorr"] = l_decorr
@@ -508,20 +515,26 @@ class CtrlAUModel(nn.Module):
             loss_au_au = self.au_bce_loss(au_au_logits, au_labels)
             losses["loss_au_au"] = loss_au_au
             
-            # Contrastive text-visual alignment
-            text_emb = self._get_text_embeddings(device=device)
-            au_emb_mean = torch.stack([e.mean(dim=0) for e in au_embeddings])
-            visual_proj = self.visual_proj(au_emb_mean)
-            text_proj = self.text_proj(text_emb)
-            loss_contrastive = self.contrastive_loss(visual_proj, text_proj)
+            # Contrastive text-visual alignment (optional in Phase 2/3)
+            if getattr(self.cfg, "lambda_contrastive", 0) > 0:
+                text_emb = self._get_text_embeddings(device=device)
+                au_emb_mean = torch.stack([e.mean(dim=0) for e in au_embeddings])
+                visual_proj = self.visual_proj(au_emb_mean)
+                text_proj = self.text_proj(text_emb)
+                loss_contrastive = self.contrastive_loss(visual_proj, text_proj)
+            else:
+                loss_contrastive = torch.tensor(0.0, device=device)
             losses["loss_contrastive"] = loss_contrastive
             
-            # Emotion contrastive
-            emo_text_emb = self._get_emotion_text_embeddings(device=device)
-            emo_emb_mean = emotion_emb_stacked.mean(dim=0)
-            emo_visual_proj = self.emotion_visual_proj(emo_emb_mean)
-            emo_text_proj = self.emotion_text_proj(emo_text_emb)
-            loss_emo_contrastive = self.contrastive_loss(emo_visual_proj, emo_text_proj)
+            # Emotion contrastive (optional in Phase 2/3)
+            if getattr(self.cfg, "lambda_emo_contrastive", 0) > 0:
+                emo_text_emb = self._get_emotion_text_embeddings(device=device)
+                emo_emb_mean = emotion_emb_stacked.mean(dim=0)
+                emo_visual_proj = self.emotion_visual_proj(emo_emb_mean)
+                emo_text_proj = self.emotion_text_proj(emo_text_emb)
+                loss_emo_contrastive = self.contrastive_loss(emo_visual_proj, emo_text_proj)
+            else:
+                loss_emo_contrastive = torch.tensor(0.0, device=device)
             losses["loss_emo_contrastive"] = loss_emo_contrastive
             
             # DAG loss
@@ -547,7 +560,7 @@ class CtrlAUModel(nn.Module):
             losses["loss_causal_exp"] = loss_causal_exp
             
             loss_facs_exp = self.facs_emotion_violation_loss(
-                graph_au_probs, graph_emo_probs[:, :NUM_EMOTIONS]
+                graph_au_probs, graph_emo_probs
             )
             losses["loss_facs_exp"] = loss_facs_exp
             

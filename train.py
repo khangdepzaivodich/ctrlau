@@ -309,9 +309,10 @@ def main():
     if args.phase == 1:
         print("=== Phase 1: Feature Extraction ===")
         if args.model == "ctrlau":
-            print("CtrlAU Method: Combining SymGraphAU Backbone with Phase 1 Regularizers:")
+            print("CtrlAU Method: Phase 1 Feature Learning with Core Method Regularizers:")
             print("  - HSIC Disentanglement (L_ib, L_align, L_decorr)")
-            print("  - CLIP Text-Visual Contrastive Alignment (on active y=1 samples)")
+            print("  - CLIP Text-Visual Contrastive Alignment (AUs & Emotions on active y=1)")
+            print("  - FACS AU Rule: Removed (0.0) from Phase 1")
             model.cfg.lambda_ib = 1e-2
             model.cfg.lambda_align = 1e-2
             model.cfg.lambda_decorr = 1e-2
@@ -339,29 +340,55 @@ def main():
         
     elif args.phase == 2:
         print("=== Phase 2: Graph Learning ===")
-        print("Freezing Backbone and CNNs. Training only the Graph Modules.")
-        for param in model.backbone.parameters():
-            param.requires_grad = False
-        for param in model.au_head.parameters():
-            param.requires_grad = False
-        for param in model.emotion_head.parameters():
-            param.requires_grad = False
-        for param in model.text_encoder.parameters():
-            param.requires_grad = False
-        for param in model.visual_proj.parameters():
-            param.requires_grad = False
-        for param in model.text_proj.parameters():
-            param.requires_grad = False
-        for param in model.emotion_visual_proj.parameters():
-            param.requires_grad = False
-        for param in model.emotion_text_proj.parameters():
-            param.requires_grad = False
+        print("Freezing Backbone, LinearBlock, and CNN heads. Training only the Graph & Causal Modules.")
+        if hasattr(model, "backbone"):
+            for param in model.backbone.parameters():
+                param.requires_grad = False
+        if hasattr(model, "global_linear"):
+            for param in model.global_linear.parameters():
+                param.requires_grad = False
+        if hasattr(model, "au_head"):
+            for param in model.au_head.parameters():
+                param.requires_grad = False
+        if hasattr(model, "emotion_head"):
+            for param in model.emotion_head.parameters():
+                param.requires_grad = False
+        if hasattr(model, "text_encoder"):
+            for param in model.text_encoder.parameters():
+                param.requires_grad = False
+        if hasattr(model, "visual_proj"):
+            for param in model.visual_proj.parameters():
+                param.requires_grad = False
+        if hasattr(model, "text_proj"):
+            for param in model.text_proj.parameters():
+                param.requires_grad = False
+        if hasattr(model, "emotion_visual_proj"):
+            for param in model.emotion_visual_proj.parameters():
+                param.requires_grad = False
+        if hasattr(model, "emotion_text_proj"):
+            for param in model.emotion_text_proj.parameters():
+                param.requires_grad = False
             
+        # Freeze CNN classification losses, enable Graph & Causal losses
         model.cfg.lambda_au = 0.0
         model.cfg.lambda_emotion = 0.0
         model.cfg.lambda_ib = 0.0
         model.cfg.lambda_align = 0.0
         model.cfg.lambda_decorr = 0.0
+        model.cfg.lambda_contrastive = 0.0
+        model.cfg.lambda_emo_contrastive = 0.0
+        model.cfg.lambda_facs_au = 0.0
+        
+        # Phase 2 Graph & Causal weights
+        model.cfg.lambda_au_au = 1.0
+        model.cfg.lambda_graph_au = 1.0
+        model.cfg.lambda_graph_emo = 1.0
+        model.cfg.lambda_dag = 0.1
+        model.cfg.lambda_causal_au = 0.1
+        model.cfg.lambda_causal_exp = 0.1
+        model.cfg.lambda_facs_exp = 0.1
+        model.cfg.lambda_cf_important = 0.1
+        model.cfg.lambda_cf_unimportant = 0.1
         
     elif args.phase == 3:
         print("=== Phase 3: End-to-End Fine-Tuning ===")
@@ -377,9 +404,27 @@ def main():
     
     if args.resume:
         if os.path.isfile(args.resume):
-            print(f"Loading checkpoint from {args.resume}...")
-            model.load_state_dict(torch.load(args.resume, map_location=device))
-            print("Checkpoint loaded successfully.")
+            print(f"Loading checkpoint from: {args.resume}")
+            ckpt = torch.load(args.resume, map_location=device)
+            if isinstance(ckpt, dict) and "state_dict" in ckpt:
+                ckpt = ckpt["state_dict"]
+            elif isinstance(ckpt, dict) and "model" in ckpt:
+                ckpt = ckpt["model"]
+
+            # Standardize key names (remove 'module.' or 'stage1.' prefixes)
+            from collections import OrderedDict
+            cleaned_state = OrderedDict()
+            for k, v in ckpt.items():
+                new_k = k.replace("module.", "")
+                if new_k.startswith("stage1."):
+                    new_k = new_k.replace("stage1.", "")
+                cleaned_state[new_k] = v
+
+            missing, unexpected = model.load_state_dict(cleaned_state, strict=False)
+            print(f"Checkpoint loaded successfully (strict=False):")
+            print(f"  Matched keys: {len(cleaned_state) - len(unexpected)}")
+            print(f"  Missing keys (uninitialized in P1, e.g. Graph heads in Phase 2): {len(missing)}")
+            print(f"  Unexpected keys: {len(unexpected)}")
         else:
             print(f"Warning: Checkpoint file '{args.resume}' not found. Starting from scratch.")
 

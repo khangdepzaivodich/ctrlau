@@ -137,14 +137,13 @@ class HSICDisentanglementLoss(nn.Module):
         l_align = -l_align / N  # negate because we want to maximize
         
         # L_decorr: minimize dependence between different AU reprs
+        # Paper Eq. (1): (1 / N_AU^2) * sum_{i != j} HSIC(f_AU^i, f_AU^j)
+        # Using symmetry HSIC(A, B) = HSIC(B, A), sum_{i != j} = 2 * sum_{i < j}
         l_decorr = torch.tensor(0.0, device=device)
-        count = 0
         for i in range(N):
             for j in range(i + 1, N):
                 l_decorr = l_decorr + hsic(au_embeddings[i], au_embeddings[j])
-                count += 1
-        if count > 0:
-            l_decorr = l_decorr / count
+        l_decorr = (2.0 * l_decorr) / (N ** 2)
         
         return l_ib, l_align, l_decorr
 
@@ -318,26 +317,38 @@ class FACSEmotionViolationLoss(nn.Module):
     Evaluates strict logic gates using Fuzzy Logic (T-norm).
     Formula: Prob(A) * Prob(B) * ... * (1 - Prob(Emotion))
     """
+    # Mapping from rule emotion names to SYM_EMOTIONS indices:
+    # SYM_EMOTIONS = ["Angry", "Fear", "Happy", "Sad", "Surprise", "Disgust", "Neutral"]
+    EMO_TO_SYM_IDX = {
+        "anger": 0,
+        "fear": 1,
+        "happiness": 2,
+        "sadness": 3,
+        "surprise": 4,
+        "disgust": 5,
+    }
+
     def __init__(self):
         super().__init__()
-        # Import config to get the dynamic indices
-        from config import EMOTION_AU_RULES_IDX, EMOTIONS
+        from config import EMOTION_AU_RULES_IDX
         self.rules = EMOTION_AU_RULES_IDX
-        self.emotions = EMOTIONS
-        
+
     def forward(self, au_probs, emotion_probs):
         """
         Args:
             au_probs: (B, N_AU) AU probabilities
-            emotion_probs: (B, N_EMOTIONS) Emotion probabilities
+            emotion_probs: (B, N_EMO) Emotion probabilities (ordered by SYM_EMOTIONS)
         Returns:
             violation loss scalar
         """
         device = au_probs.device
         total_violation = torch.tensor(0.0, device=device)
         
-        for emo_idx, emo_name in enumerate(self.emotions):
-            rule = self.rules[emo_name]
+        for emo_name, rule in self.rules.items():
+            sym_idx = self.EMO_TO_SYM_IDX.get(emo_name, None)
+            if sym_idx is None or sym_idx >= emotion_probs.size(1):
+                continue
+
             au_indices = rule["required_idx"]
             
             # Gather relevant AU probabilities
@@ -351,7 +362,7 @@ class FACSEmotionViolationLoss(nn.Module):
                 
             # Violation: AUs are firing but Emotion is NOT firing
             # Violation = au_score * (1 - emotion_prob)
-            violation = au_score * (1.0 - emotion_probs[:, emo_idx])
+            violation = au_score * (1.0 - emotion_probs[:, sym_idx])
             total_violation += violation.mean()
             
         return total_violation
