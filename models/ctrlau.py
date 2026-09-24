@@ -495,63 +495,31 @@ class CtrlAUModel(nn.Module):
         au_au_imp_mask, au_au_pol_mask = self.mask_module.forward_au_au(au_au_adj)
         au_exp_imp_mask, au_exp_pol_mask = self.mask_module.forward_au_exp(au_exp_adj)
         
-        # Losses for Phase 2 / Phase 3
+        # ============================================================
+        # Losses for Phase 2 / Phase 3 (Graph Learning & Causal Interventions)
+        # ============================================================
         if au_labels is not None:
-            # HSIC Disentanglement (optional in Phase 2/3)
-            if (getattr(self.cfg, "lambda_ib", 0) > 0 or 
-                getattr(self.cfg, "lambda_align", 0) > 0 or 
-                getattr(self.cfg, "lambda_decorr", 0) > 0):
-                z_img_global = z_img.mean(dim=2)
-                l_ib, l_align, l_decorr = self.hsic_loss(au_embeddings, z_img_global, au_labels)
-            else:
-                l_ib = torch.tensor(0.0, device=device)
-                l_align = torch.tensor(0.0, device=device)
-                l_decorr = torch.tensor(0.0, device=device)
-            losses["loss_ib"] = l_ib
-            losses["loss_align"] = l_align
-            losses["loss_decorr"] = l_decorr
-            
-            # AU-AU graph loss
+            # 1. AU-AU intermediate graph prediction loss
             loss_au_au = self.au_bce_loss(au_au_logits, au_labels)
             losses["loss_au_au"] = loss_au_au
             
-            # Contrastive text-visual alignment (optional in Phase 2/3)
-            if getattr(self.cfg, "lambda_contrastive", 0) > 0:
-                text_emb = self._get_text_embeddings(device=device)
-                au_emb_mean = torch.stack([e.mean(dim=0) for e in au_embeddings])
-                visual_proj = self.visual_proj(au_emb_mean)
-                text_proj = self.text_proj(text_emb)
-                loss_contrastive = self.contrastive_loss(visual_proj, text_proj)
-            else:
-                loss_contrastive = torch.tensor(0.0, device=device)
-            losses["loss_contrastive"] = loss_contrastive
+            # 2. Final Graph AU & Emotion prediction losses
+            loss_graph_au = self.au_bce_loss(graph_au_logits, au_labels)
+            losses["loss_graph_au"] = loss_graph_au
             
-            # Emotion contrastive (optional in Phase 2/3)
-            if getattr(self.cfg, "lambda_emo_contrastive", 0) > 0:
-                emo_text_emb = self._get_emotion_text_embeddings(device=device)
-                emo_emb_mean = emotion_emb_stacked.mean(dim=0)
-                emo_visual_proj = self.emotion_visual_proj(emo_emb_mean)
-                emo_text_proj = self.emotion_text_proj(emo_text_emb)
-                loss_emo_contrastive = self.contrastive_loss(emo_visual_proj, emo_text_proj)
-            else:
-                loss_emo_contrastive = torch.tensor(0.0, device=device)
-            losses["loss_emo_contrastive"] = loss_emo_contrastive
+            loss_graph_emo = self.expression_bce_loss(graph_emo_probs, emotion_pseudo)
+            losses["loss_graph_emo"] = loss_graph_emo
             
-            # DAG loss
+            # 3. Soft DAG Acyclicity Loss on AU-AU adjacency
             loss_dag = self.dag_loss(au_au_adj)
             losses["loss_dag"] = loss_dag
             
-            # Causal & FACS Violation losses
+            # 4. Causal Structure Violation Losses
             causal_au_target = au_labels.float()
             loss_causal_au = self.violation_loss(
                 causal_au_target, au_au_adj, au_au_pol_mask, au_au_imp_mask
             )
             losses["loss_causal_au"] = loss_causal_au
-            
-            loss_facs_cnn = self.facs_au_violation_loss(au_probs)
-            loss_facs_graph = self.facs_au_violation_loss(graph_au_probs)
-            loss_facs_au = loss_facs_cnn + loss_facs_graph
-            losses["loss_facs_au"] = loss_facs_au
             
             causal_exp_target = torch.cat([causal_au_target, emotion_pseudo], dim=1)
             loss_causal_exp = self.violation_loss(
@@ -559,19 +527,13 @@ class CtrlAUModel(nn.Module):
             )
             losses["loss_causal_exp"] = loss_causal_exp
             
+            # 5. FACS AU-Emotion Hypergraph Loss
             loss_facs_exp = self.facs_emotion_violation_loss(
                 graph_au_probs, graph_emo_probs
             )
             losses["loss_facs_exp"] = loss_facs_exp
             
-            # Graph prediction losses
-            loss_graph_au = self.au_bce_loss(graph_au_logits, au_labels)
-            losses["loss_graph_au"] = loss_graph_au
-            
-            loss_graph_emo = self.expression_bce_loss(graph_emo_probs, emotion_pseudo)
-            losses["loss_graph_emo"] = loss_graph_emo
-            
-            # HiMod Counterfactual Intervention
+            # 6. HiMod Feature-Level Counterfactual Intervention
             cf_importance = au_au_imp_mask.diagonal()
             cf_mask = (cf_importance > self.cf_threshold).float()
             sparsity_scale = (self.au_pos_weights / self.au_pos_weights.mean()).view(1, -1, 1)
@@ -602,25 +564,16 @@ class CtrlAUModel(nn.Module):
             losses["loss_cf_important"] = loss_cf_imp
             losses["loss_cf_unimportant"] = loss_cf_unimp
             
-            # Combined Loss for Phase 2 / Phase 3
+            # Phase 2 Total Loss: Pure Graph & Causal Reasoning
             cfg = self.cfg
-            gamma_emo = 0.05 if cfg.lambda_emotion == 0.1 else cfg.lambda_emotion
             total_loss = (
-                cfg.lambda_au * loss_wa +
-                gamma_emo * loss_we +
-                cfg.lambda_ib * l_ib +
-                cfg.lambda_align * l_align +
-                cfg.lambda_decorr * l_decorr +
-                cfg.lambda_contrastive * loss_contrastive +
-                cfg.lambda_emo_contrastive * loss_emo_contrastive +
-                cfg.lambda_dag * loss_dag +
-                cfg.lambda_causal_au * loss_causal_au +
-                cfg.lambda_causal_exp * loss_causal_exp +
-                cfg.lambda_facs_au * loss_facs_au +
-                cfg.lambda_facs_exp * loss_facs_exp +
                 cfg.lambda_au_au * loss_au_au +
                 cfg.lambda_graph_au * loss_graph_au +
                 cfg.lambda_graph_emo * loss_graph_emo +
+                cfg.lambda_dag * loss_dag +
+                cfg.lambda_causal_au * loss_causal_au +
+                cfg.lambda_causal_exp * loss_causal_exp +
+                cfg.lambda_facs_exp * loss_facs_exp +
                 cfg.lambda_cf_important * loss_cf_imp +
                 cfg.lambda_cf_unimportant * loss_cf_unimp
             )
