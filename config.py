@@ -140,8 +140,13 @@ class ModelConfig:
     lambda_causal_au = 0.1         # Causal structural rule on AU-AU graph
     lambda_causal_exp = 0.1        # Causal structural rule on AU-Exp graph
     lambda_facs_exp = 0.1          # FACS emotion rules on AU-Exp graph
-    lambda_cf_important = 0.1      # Counterfactual important perturbation
-    lambda_cf_unimportant = 0.1    # Counterfactual unimportant perturbation
+    # Counterfactual Intervention Weights (Level 1: AU-AU, Level 2: AU-Exp)
+    lambda_cf_important = 0.1      # Global fallback
+    lambda_cf_unimportant = 0.1    # Global fallback
+    lambda_cf_au_imp = 0.1         # Level 1 AU-AU causal discrepancy
+    lambda_cf_au_unimp = 0.1       # Level 1 AU-AU non-causal consistency
+    lambda_cf_exp_imp = 0.1        # Level 2 AU-Exp causal discrepancy
+    lambda_cf_exp_unimp = 0.1      # Level 2 AU-Exp non-causal consistency
     
     # Training (Differential Learning Rate to prevent overfitting on DISFA video frames)
     lr = 0.0001                    # Default / heads learning rate

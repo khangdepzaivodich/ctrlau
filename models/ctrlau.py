@@ -169,11 +169,14 @@ class CtrlAUModel(nn.Module):
         self.dag_loss = DAGLoss(num_nodes=NUM_AUS)
         self.violation_loss = ViolationLoss()
         self.facs_emotion_violation_loss = FACSEmotionViolationLoss()
-        self.facs_au_violation_loss = FACSAUViolationLoss()
-        self.cf_loss = CounterfactualLoss()
+        # ---- Counterfactual Loss modules (Level 1: AU-AU, Level 2: AU-Exp) ----
+        self.cf_loss = CounterfactualLoss() # backward compatibility
+        self.cf_loss_au = CounterfactualLoss(is_expression=False)
+        self.cf_loss_exp = CounterfactualLoss(is_expression=True)
         
-        # ---- Counterfactual mask threshold ----
+        # ---- Counterfactual mask thresholds (learnable) ----
         self.cf_threshold = nn.Parameter(torch.tensor(0.5))
+        self.cf_threshold_exp = nn.Parameter(torch.tensor(0.5))
         
         # ---- Precompute text descriptions ----
         self._text_descriptions = [AU_DESCRIPTIONS[au] for au in DISFA_AUS]
@@ -533,63 +536,111 @@ class CtrlAUModel(nn.Module):
             )
             losses["loss_facs_exp"] = loss_facs_exp
             
-            # 6. Feature-Level Counterfactual Intervention (Source -> Target with Soft Mask & Cosine Similarity)
-            # Following CausalAffect (Hu et al. arXiv:2512.00456, Eqs. 11-15)
+            # 6. Hierarchical Counterfactual Intervention (4 Losses across Level 1 & Level 2)
+            # Following CausalAffect (Hu et al. arXiv:2512.00456, Section 4.4 & 4.5, Eqs. 11-16)
             gamma_cf = getattr(self.cfg, "cf_gamma", 5.0)
             sparsity_scale = (self.au_pos_weights / self.au_pos_weights.mean()).view(1, 1, -1, 1) # (1, 1, NUM_AUS, 1)
-            
-            # (1) Continuous Soft Mask on AU-AU importance: Eq. 11
-            # Row j represents all source AUs influencing target AU j
-            m_soft = torch.sigmoid(gamma_cf * (au_au_imp_mask - self.cf_threshold)) # (NUM_AUS, NUM_AUS)
-            m_discrep = m_soft                       # Causal source mask for target j
-            m_consist = 1.0 - m_soft                 # Non-causal source mask for target j
-            
-            # Base Gaussian perturbation
             noise_base = torch.randn(B, 1, NUM_AUS, self.cfg.au_embed_dim, device=device) * (self.cfg.noise_std * sparsity_scale)
             
-            # (2) Parallel Batched Source -> Target Intervention
-            # Expand updated_au to (B, NUM_AUS_target, NUM_AUS_source, D)
-            au_expanded = updated_au.unsqueeze(1)    # (B, 1, NUM_AUS, D)
-            m_discrep_exp = m_discrep.unsqueeze(0).unsqueeze(-1) # (1, NUM_AUS_target, NUM_AUS_source, 1)
-            m_consist_exp = m_consist.unsqueeze(0).unsqueeze(-1)
+            # =========================================================
+            # LEVEL 1: AU-AU Graph Counterfactual Intervention (Losses 1 & 2)
+            # Source: AU_i -> Target: AU_j
+            # =========================================================
+            # Soft Mask on AU-AU causal importance: Eq. 11
+            m_soft_au = torch.sigmoid(gamma_cf * (au_au_imp_mask - self.cf_threshold)) # (8, 8)
+            m_discrep_au = m_soft_au
+            m_consist_au = 1.0 - m_soft_au
             
-            # Perturb source AUs according to each target j's causal and non-causal masks
-            au_imp_all = (au_expanded + noise_base * m_discrep_exp).view(B * NUM_AUS, NUM_AUS, -1)
-            au_unimp_all = (au_expanded + noise_base * m_consist_exp).view(B * NUM_AUS, NUM_AUS, -1)
+            au_expanded_1 = au_emb_stacked.unsqueeze(1)    # (B, 1, NUM_AUS, D)
+            m_discrep_exp_1 = m_discrep_au.unsqueeze(0).unsqueeze(-1) # (1, NUM_AUS, NUM_AUS, 1)
+            m_consist_exp_1 = m_consist_au.unsqueeze(0).unsqueeze(-1)
             
-            emo_repeat = emotion_emb_stacked.unsqueeze(1).expand(-1, NUM_AUS, -1, -1).reshape(B * NUM_AUS, self.num_emotions, -1)
+            # Perturb source AUs for each target AU j
+            au_imp_all_1 = (au_expanded_1 + noise_base * m_discrep_exp_1).view(B * NUM_AUS, NUM_AUS, -1)
+            au_unimp_all_1 = (au_expanded_1 + noise_base * m_consist_exp_1).view(B * NUM_AUS, NUM_AUS, -1)
             
-            # Forward perturbed representations through AU-Exp GAT
-            up_nodes_imp, _ = self.graph_module.forward_au_exp(au_imp_all, emo_repeat)
-            up_nodes_unimp, _ = self.graph_module.forward_au_exp(au_unimp_all, emo_repeat)
+            # Forward perturbed representations through AU-AU GAT
+            up_nodes_imp_1, _ = self.graph_module.forward_au_au(au_imp_all_1)
+            up_nodes_unimp_1, _ = self.graph_module.forward_au_au(au_unimp_all_1)
             
-            # Reshape to (B, NUM_AUS_target, Total_Nodes, D)
-            up_nodes_imp = up_nodes_imp.view(B, NUM_AUS, NUM_AUS + self.num_emotions, -1)
-            up_nodes_unimp = up_nodes_unimp.view(B, NUM_AUS, NUM_AUS + self.num_emotions, -1)
+            # Reshape to (B, NUM_AUS_target, NUM_AUS_nodes, D)
+            up_nodes_imp_1 = up_nodes_imp_1.view(B, NUM_AUS, NUM_AUS, -1)
+            up_nodes_unimp_1 = up_nodes_unimp_1.view(B, NUM_AUS, NUM_AUS, -1)
             
-            # For each target j, extract node j's feature under perturbation
-            updated_au_imp = torch.stack([up_nodes_imp[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, NUM_AUS, D)
-            updated_au_unimp = torch.stack([up_nodes_unimp[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, NUM_AUS, D)
+            # For each target AU j, extract node j's representation under perturbation
+            updated_au_imp_1 = torch.stack([up_nodes_imp_1[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, 8, D)
+            updated_au_unimp_1 = torch.stack([up_nodes_unimp_1[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, 8, D)
             
-            # Classify perturbed features for each AU
-            graph_au_logits_imp = torch.cat([self.graph_au_classifiers[i](updated_au_imp[:, i, :]) for i in range(NUM_AUS)], dim=1)
-            graph_au_probs_imp = torch.sigmoid(graph_au_logits_imp)
+            probs_imp_1 = torch.sigmoid(torch.cat([self.au_au_classifiers[i](updated_au_imp_1[:, i, :]) for i in range(NUM_AUS)], dim=1))
+            probs_unimp_1 = torch.sigmoid(torch.cat([self.au_au_classifiers[i](updated_au_unimp_1[:, i, :]) for i in range(NUM_AUS)], dim=1))
             
-            graph_au_logits_unimp = torch.cat([self.graph_au_classifiers[i](updated_au_unimp[:, i, :]) for i in range(NUM_AUS)], dim=1)
-            graph_au_probs_unimp = torch.sigmoid(graph_au_logits_unimp)
-            
-            # (3) Dual-level Counterfactual Loss (Feature Cosine Distance + Logit MSE)
-            loss_cf_imp, loss_cf_unimp = self.cf_loss(
-                graph_au_probs.detach(), graph_au_probs_imp, graph_au_probs_unimp,
-                feat_original=updated_au_final.detach(),
-                feat_important_perturbed=updated_au_imp,
-                feat_unimportant_perturbed=updated_au_unimp
+            # Level 1 CF Losses: Feature Cosine + Logit MSE
+            loss_cf_au_imp, loss_cf_au_unimp = self.cf_loss_au(
+                au_au_probs.detach(), probs_imp_1, probs_unimp_1,
+                feat_original=updated_au.detach(),
+                feat_important_perturbed=updated_au_imp_1,
+                feat_unimportant_perturbed=updated_au_unimp_1
             )
+            losses["loss_cf_au_imp"] = loss_cf_au_imp
+            losses["loss_cf_au_unimp"] = loss_cf_au_unimp
+            
+            # =========================================================
+            # LEVEL 2: AU-Expression Graph Counterfactual Intervention (Losses 3 & 4)
+            # Source: AU_i -> Target: Expression_k
+            # =========================================================
+            # Extract AU -> Expression submatrix from au_exp_imp_mask (7, 8)
+            au_exp_imp_sub = au_exp_imp_mask[NUM_AUS:, :NUM_AUS] # (7, 8)
+            m_soft_exp = torch.sigmoid(gamma_cf * (au_exp_imp_sub - self.cf_threshold_exp)) # (7, 8)
+            m_discrep_exp = m_soft_exp
+            m_consist_exp = 1.0 - m_soft_exp
+            
+            au_expanded_2 = updated_au.unsqueeze(1)    # (B, 1, NUM_AUS, D)
+            m_discrep_exp_2 = m_discrep_exp.unsqueeze(0).unsqueeze(-1) # (1, 7, 8, 1)
+            m_consist_exp_2 = m_consist_exp.unsqueeze(0).unsqueeze(-1)
+            
+            # Perturb source AUs for each target Emotion k
+            au_imp_all_2 = (au_expanded_2 + noise_base * m_discrep_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
+            au_unimp_all_2 = (au_expanded_2 + noise_base * m_consist_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
+            
+            emo_repeat_2 = emotion_emb_stacked.unsqueeze(1).expand(-1, self.num_emotions, -1, -1).reshape(B * self.num_emotions, self.num_emotions, -1)
+            
+            # Forward perturbed representations through AU-Exp Bipartite GAT
+            up_nodes_imp_2, _ = self.graph_module.forward_au_exp(au_imp_all_2, emo_repeat_2)
+            up_nodes_unimp_2, _ = self.graph_module.forward_au_exp(au_unimp_all_2, emo_repeat_2)
+            
+            up_nodes_imp_2 = up_nodes_imp_2.view(B, self.num_emotions, NUM_AUS + self.num_emotions, -1)
+            up_nodes_unimp_2 = up_nodes_unimp_2.view(B, self.num_emotions, NUM_AUS + self.num_emotions, -1)
+            
+            # For each target Emotion k, extract emotion node k's representation (index NUM_AUS + k)
+            updated_emo_imp_2 = torch.stack([up_nodes_imp_2[:, k, NUM_AUS + k, :] for k in range(self.num_emotions)], dim=1) # (B, 7, D)
+            updated_emo_unimp_2 = torch.stack([up_nodes_unimp_2[:, k, NUM_AUS + k, :] for k in range(self.num_emotions)], dim=1) # (B, 7, D)
+            
+            probs_imp_2 = torch.sigmoid(torch.cat([self.graph_emo_classifiers[k](updated_emo_imp_2[:, k, :]) for k in range(self.num_emotions)], dim=1))
+            probs_unimp_2 = torch.sigmoid(torch.cat([self.graph_emo_classifiers[k](updated_emo_unimp_2[:, k, :]) for k in range(self.num_emotions)], dim=1))
+            
+            # Level 2 CF Losses: Feature Cosine + Logit MSE/KL
+            loss_cf_exp_imp, loss_cf_exp_unimp = self.cf_loss_exp(
+                graph_emo_probs.detach(), probs_imp_2, probs_unimp_2,
+                feat_original=updated_emo_final.detach(),
+                feat_important_perturbed=updated_emo_imp_2,
+                feat_unimportant_perturbed=updated_emo_unimp_2
+            )
+            losses["loss_cf_exp_imp"] = loss_cf_exp_imp
+            losses["loss_cf_exp_unimp"] = loss_cf_exp_unimp
+            
+            # Combined / Global Counterfactual Losses
+            loss_cf_imp = 0.5 * (loss_cf_au_imp + loss_cf_exp_imp)
+            loss_cf_unimp = 0.5 * (loss_cf_au_unimp + loss_cf_exp_unimp)
             losses["loss_cf_important"] = loss_cf_imp
             losses["loss_cf_unimportant"] = loss_cf_unimp
             
-            # Phase 2 Total Loss: Pure Graph & Causal Reasoning
+            # Phase 2 Total Loss: Pure Graph & Hierarchical Causal Reasoning (Eq. 16)
             cfg = self.cfg
+            w_cf_au_imp = getattr(cfg, "lambda_cf_au_imp", cfg.lambda_cf_important)
+            w_cf_au_unimp = getattr(cfg, "lambda_cf_au_unimp", cfg.lambda_cf_unimportant)
+            w_cf_exp_imp = getattr(cfg, "lambda_cf_exp_imp", cfg.lambda_cf_important)
+            w_cf_exp_unimp = getattr(cfg, "lambda_cf_exp_unimp", cfg.lambda_cf_unimportant)
+            
             total_loss = (
                 cfg.lambda_au_au * loss_au_au +
                 cfg.lambda_graph_au * loss_graph_au +
@@ -598,8 +649,10 @@ class CtrlAUModel(nn.Module):
                 cfg.lambda_causal_au * loss_causal_au +
                 cfg.lambda_causal_exp * loss_causal_exp +
                 cfg.lambda_facs_exp * loss_facs_exp +
-                cfg.lambda_cf_important * loss_cf_imp +
-                cfg.lambda_cf_unimportant * loss_cf_unimp
+                w_cf_au_imp * loss_cf_au_imp +
+                w_cf_au_unimp * loss_cf_au_unimp +
+                w_cf_exp_imp * loss_cf_exp_imp +
+                w_cf_exp_unimp * loss_cf_exp_unimp
             )
             losses["total_loss"] = total_loss
         

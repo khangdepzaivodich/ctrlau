@@ -80,6 +80,10 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
                 msg += f", L_clip_exp: {running_losses['loss_emo_contrastive'] / num_batches:.4f}"
             if "loss_facs_au" in running_losses and running_losses['loss_facs_au'] > 0:
                 msg += f", L_facs: {running_losses['loss_facs_au'] / num_batches:.4f}"
+            if "loss_cf_au_imp" in running_losses and running_losses['loss_cf_au_imp'] > 0:
+                msg += f", CF_au: {running_losses['loss_cf_au_imp'] / num_batches:.4f}"
+            if "loss_cf_exp_imp" in running_losses and running_losses['loss_cf_exp_imp'] > 0:
+                msg += f", CF_exp: {running_losses['loss_cf_exp_imp'] / num_batches:.4f}"
             print(msg)
     
     # Print epoch summary
@@ -395,6 +399,10 @@ def main():
         model.cfg.lambda_facs_exp = 0.1
         model.cfg.lambda_cf_important = 0.1
         model.cfg.lambda_cf_unimportant = 0.1
+        model.cfg.lambda_cf_au_imp = 0.1
+        model.cfg.lambda_cf_au_unimp = 0.1
+        model.cfg.lambda_cf_exp_imp = 0.1
+        model.cfg.lambda_cf_exp_unimp = 0.1
         
     elif args.phase == 3:
         print("=== Phase 3: End-to-End Fine-Tuning ===")
