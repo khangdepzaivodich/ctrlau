@@ -533,33 +533,57 @@ class CtrlAUModel(nn.Module):
             )
             losses["loss_facs_exp"] = loss_facs_exp
             
-            # 6. HiMod Feature-Level Counterfactual Intervention
-            cf_importance = au_au_imp_mask.diagonal()
-            cf_mask = (cf_importance > self.cf_threshold).float()
-            sparsity_scale = (self.au_pos_weights / self.au_pos_weights.mean()).view(1, -1, 1)
+            # 6. Feature-Level Counterfactual Intervention (Source -> Target with Soft Mask & Cosine Similarity)
+            # Following CausalAffect (Hu et al. arXiv:2512.00456, Eqs. 11-15)
+            gamma_cf = getattr(self.cfg, "cf_gamma", 5.0)
+            sparsity_scale = (self.au_pos_weights / self.au_pos_weights.mean()).view(1, 1, -1, 1) # (1, 1, NUM_AUS, 1)
             
-            noise_imp = torch.randn_like(updated_au) * (self.cfg.noise_std * sparsity_scale)
-            au_embeddings_imp = updated_au + noise_imp * cf_mask.view(1, -1, 1)
+            # (1) Continuous Soft Mask on AU-AU importance: Eq. 11
+            # Row j represents all source AUs influencing target AU j
+            m_soft = torch.sigmoid(gamma_cf * (au_au_imp_mask - self.cf_threshold)) # (NUM_AUS, NUM_AUS)
+            m_discrep = m_soft                       # Causal source mask for target j
+            m_consist = 1.0 - m_soft                 # Non-causal source mask for target j
             
-            noise_unimp = torch.randn_like(updated_au) * (self.cfg.noise_std * sparsity_scale)
-            au_embeddings_unimp = updated_au + noise_unimp * (1.0 - cf_mask.view(1, -1, 1))
+            # Base Gaussian perturbation
+            noise_base = torch.randn(B, 1, NUM_AUS, self.cfg.au_embed_dim, device=device) * (self.cfg.noise_std * sparsity_scale)
             
-            updated_nodes_imp, _ = self.graph_module.forward_au_exp(au_embeddings_imp, emotion_emb_stacked)
-            updated_au_imp = updated_nodes_imp[:, :NUM_AUS, :]
-            graph_au_logits_imp = []
-            for i in range(NUM_AUS):
-                graph_au_logits_imp.append(self.graph_au_classifiers[i](updated_au_imp[:, i, :]))
-            graph_au_probs_imp = torch.sigmoid(torch.cat(graph_au_logits_imp, dim=1))
+            # (2) Parallel Batched Source -> Target Intervention
+            # Expand updated_au to (B, NUM_AUS_target, NUM_AUS_source, D)
+            au_expanded = updated_au.unsqueeze(1)    # (B, 1, NUM_AUS, D)
+            m_discrep_exp = m_discrep.unsqueeze(0).unsqueeze(-1) # (1, NUM_AUS_target, NUM_AUS_source, 1)
+            m_consist_exp = m_consist.unsqueeze(0).unsqueeze(-1)
             
-            updated_nodes_unimp, _ = self.graph_module.forward_au_exp(au_embeddings_unimp, emotion_emb_stacked)
-            updated_au_unimp = updated_nodes_unimp[:, :NUM_AUS, :]
-            graph_au_logits_unimp = []
-            for i in range(NUM_AUS):
-                graph_au_logits_unimp.append(self.graph_au_classifiers[i](updated_au_unimp[:, i, :]))
-            graph_au_probs_unimp = torch.sigmoid(torch.cat(graph_au_logits_unimp, dim=1))
+            # Perturb source AUs according to each target j's causal and non-causal masks
+            au_imp_all = (au_expanded + noise_base * m_discrep_exp).view(B * NUM_AUS, NUM_AUS, -1)
+            au_unimp_all = (au_expanded + noise_base * m_consist_exp).view(B * NUM_AUS, NUM_AUS, -1)
             
+            emo_repeat = emotion_emb_stacked.unsqueeze(1).expand(-1, NUM_AUS, -1, -1).reshape(B * NUM_AUS, self.num_emotions, -1)
+            
+            # Forward perturbed representations through AU-Exp GAT
+            up_nodes_imp, _ = self.graph_module.forward_au_exp(au_imp_all, emo_repeat)
+            up_nodes_unimp, _ = self.graph_module.forward_au_exp(au_unimp_all, emo_repeat)
+            
+            # Reshape to (B, NUM_AUS_target, Total_Nodes, D)
+            up_nodes_imp = up_nodes_imp.view(B, NUM_AUS, NUM_AUS + self.num_emotions, -1)
+            up_nodes_unimp = up_nodes_unimp.view(B, NUM_AUS, NUM_AUS + self.num_emotions, -1)
+            
+            # For each target j, extract node j's feature under perturbation
+            updated_au_imp = torch.stack([up_nodes_imp[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, NUM_AUS, D)
+            updated_au_unimp = torch.stack([up_nodes_unimp[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, NUM_AUS, D)
+            
+            # Classify perturbed features for each AU
+            graph_au_logits_imp = torch.cat([self.graph_au_classifiers[i](updated_au_imp[:, i, :]) for i in range(NUM_AUS)], dim=1)
+            graph_au_probs_imp = torch.sigmoid(graph_au_logits_imp)
+            
+            graph_au_logits_unimp = torch.cat([self.graph_au_classifiers[i](updated_au_unimp[:, i, :]) for i in range(NUM_AUS)], dim=1)
+            graph_au_probs_unimp = torch.sigmoid(graph_au_logits_unimp)
+            
+            # (3) Dual-level Counterfactual Loss (Feature Cosine Distance + Logit MSE)
             loss_cf_imp, loss_cf_unimp = self.cf_loss(
-                graph_au_probs.detach(), graph_au_probs_imp, graph_au_probs_unimp
+                graph_au_probs.detach(), graph_au_probs_imp, graph_au_probs_unimp,
+                feat_original=updated_au_final.detach(),
+                feat_important_perturbed=updated_au_imp,
+                feat_unimportant_perturbed=updated_au_unimp
             )
             losses["loss_cf_important"] = loss_cf_imp
             losses["loss_cf_unimportant"] = loss_cf_unimp

@@ -374,40 +374,72 @@ class FACSEmotionViolationLoss(nn.Module):
 
 class CounterfactualLoss(nn.Module):
     """
-    Two counterfactual losses based on perturbation:
+    Dual-level Counterfactual Intervention Loss (Hu et al., CausalAffect - arXiv:2512.00456, Eqs. 13-15).
     
-    1. Perturb important regions (mask=1):
-       Expected behavior: predictions degrade.
-       Loss = -||pred_original - pred_perturbed||  (we want degradation, so maximize difference)
-       Equivalently minimize: similarity between original and perturbed.
-    
-    2. Perturb unimportant regions (mask=0):
-       Expected behavior: predictions unchanged.
-       Loss = ||pred_original - pred_perturbed||  (we want invariance, so minimize difference)
+    1. Consistency (perturbing non-causal / unimportant sources):
+       - Feature consistency: 1 - cosine_similarity(Z_orig, Z_cf_unimp)
+       - Logit consistency: MSE(pred_orig, pred_unimp)
+       => loss_unimportant = delta_feat * feat_consist + delta_logit * logit_consist
+       
+    2. Discrepancy (perturbing causal / important sources):
+       - Feature discrepancy: 1 + cosine_similarity(Z_orig, Z_cf_imp)
+       - Logit discrepancy: max(0, 1 - MSE(pred_orig, pred_imp))
+       => loss_important = eta_feat * feat_discrep + eta_logit * logit_discrep
     """
     
-    def __init__(self):
+    def __init__(self, delta_feat=1.0, delta_logit=1.0, eta_feat=1.0, eta_logit=1.0):
         super().__init__()
+        self.delta_feat = delta_feat
+        self.delta_logit = delta_logit
+        self.eta_feat = eta_feat
+        self.eta_logit = eta_logit
     
-    def forward(self, pred_original, pred_important_perturbed, pred_unimportant_perturbed):
+    def forward(
+        self, 
+        pred_original, 
+        pred_important_perturbed, 
+        pred_unimportant_perturbed,
+        feat_original=None,
+        feat_important_perturbed=None,
+        feat_unimportant_perturbed=None
+    ):
         """
         Args:
-            pred_original: (B, N) original predictions
-            pred_important_perturbed: (B, N) predictions after perturbing important regions
-            pred_unimportant_perturbed: (B, N) predictions after perturbing unimportant regions
+            pred_original: (B, N) or (B, 1) factual predictions
+            pred_important_perturbed: (B, N) or (B, 1) predictions after causal perturbation
+            pred_unimportant_perturbed: (B, N) or (B, 1) predictions after non-causal perturbation
+            feat_original: (B, N, D) or (B, D) factual feature representations Z
+            feat_important_perturbed: (B, N, D) or (B, D) feature representations under causal perturbation
+            feat_unimportant_perturbed: (B, N, D) or (B, D) feature representations under non-causal perturbation
         Returns:
             loss_important, loss_unimportant
         """
-        # Important perturbation: should cause degradation
-        # We want pred_important_perturbed to be DIFFERENT from pred_original
-        # Loss = -MSE => minimize negative MSE => maximize MSE
+        # 1. Logit-level Consistency & Discrepancy
+        logit_consist = F.mse_loss(pred_unimportant_perturbed, pred_original)
         diff_important = F.mse_loss(pred_important_perturbed, pred_original)
-        loss_important = -diff_important  # negative because we WANT large difference
+        logit_discrep = torch.clamp(1.0 - diff_important, min=0.0)
         
-        # Unimportant perturbation: should NOT cause degradation
-        # We want pred_unimportant_perturbed to be SAME as pred_original
-        loss_unimportant = F.mse_loss(pred_unimportant_perturbed, pred_original)
-        
+        # 2. Feature-level Consistency & Discrepancy (Cosine Distance)
+        if (
+            feat_original is not None 
+            and feat_important_perturbed is not None 
+            and feat_unimportant_perturbed is not None
+        ):
+            # Feature consistency: (1 - cos) -> minimize to 0
+            cos_unimp = F.cosine_similarity(feat_original, feat_unimportant_perturbed, dim=-1)
+            feat_consist = (1.0 - cos_unimp).mean()
+            
+            # Feature discrepancy: (1 + cos) -> minimize (forces orthogonality or divergence)
+            cos_imp = F.cosine_similarity(feat_original, feat_important_perturbed, dim=-1)
+            feat_discrep = (1.0 + cos_imp).mean()
+            
+            loss_unimportant = self.delta_feat * feat_consist + self.delta_logit * logit_consist
+            loss_important = self.eta_feat * feat_discrep + self.eta_logit * logit_discrep
+        else:
+            # Fallback for logit-only calls
+            loss_unimportant = logit_consist
+            loss_important = -diff_important
+            
         return loss_important, loss_unimportant
 
 

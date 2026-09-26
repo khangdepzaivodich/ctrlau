@@ -1,0 +1,205 @@
+Total occurrences: 28
+
+=== MATCH 1 ===
+alAffect Framework ‣ CausalAffect: Causal Discovery for Facial Affective Understanding" class="ltx_ref"><span class="ltx_text ltx_ref_title"><span class="ltx_tag ltx_tag_ref">4.4 </span>Feature-level Counterfactual Intervention</span></a></li>
+<li class="ltx_tocentry ltx_tocentry_subsection"><a href="#S4.SS5" title="In 4 CausalAffect Framework ‣ CausalAffect: Causal Discovery for Facial Affective Understanding" class="ltx_ref"><span class="ltx_text ltx_ref_title"><span class="ltx_tag ltx_tag_ref">4.5 </span>Unified Training Objective</span></a></li>
+</ol></li>
+<li class="ltx_tocentry ltx_tocen
+
+=== MATCH 2 ===
+mantics></math>Expression dependencies through a two-level polarity and direction aware causal hierarchy that integrates population-level regularities with sample-adaptive structures.
+A feature-level counterfactual intervention mechanism further enforces true causal effects while suppressing spurious correlations.
+Crucially, our approach requires neither jointly annotated datasets nor handcrafted causal priors, yet it recovers causal structures consistent with established psychological theories while revealing novel inhibitory and previously uncharacterized dependencies.
+Extensive experiments 
+
+=== MATCH 3 ===
+ing in a weakly supervised setting, CausalAffect requires neither co-annotated labels nor handcrafted priors. A key innovation is the <span id="S1.p3.1.3" class="ltx_text ltx_font_bold">feature-level counterfactual intervention</span>, which enables causal discovery by perturbing disentangled AU representations. Unlike prior counterfactual methods that manipulate high-level attributes (e.g., age, gender) in image space using generative models <cite class="ltx_cite ltx_citemacro_citep">(<a href="#bib.bib74" title="" class="ltx_ref">Cheong et al., 2022</a>; <a href="#bib.bib44" title="" class="l
+
+=== MATCH 4 ===
+is the <span id="S1.p3.1.3" class="ltx_text ltx_font_bold">feature-level counterfactual intervention</span>, which enables causal discovery by perturbing disentangled AU representations. Unlike prior counterfactual methods that manipulate high-level attributes (e.g., age, gender) in image space using generative models <cite class="ltx_cite ltx_citemacro_citep">(<a href="#bib.bib74" title="" class="ltx_ref">Cheong et al., 2022</a>; <a href="#bib.bib44" title="" class="ltx_ref">Liu et al., 2024</a>; <a href="#bib.bib45" title="" class="ltx_ref">Ramesh et al., 2024</a>)</cite>—approaches that are
+
+=== MATCH 5 ===
+t, a unified causal discovery framework that jointly captures population-level and sample-adaptive causal structure through global graph induction, sample-adaptive graph refinement, and feature-level counterfactual intervention.</p>
+</div></li>
+<li id="S1.I1.i3" class="ltx_item" style="list-style-type:none;"><span class="ltx_tag ltx_tag_item">•</span> 
+<div id="S1.I1.i3.p1" class="ltx_para ltx_noindent">
+<p id="S1.I1.i3.p1.1" class="ltx_p"><span id="S1.I1.i3.p1.1.1" class="ltx_text ltx_font_bold">Feature-level Counterfactual Intervention.</span> We propose a bottleneck-based intervention mecha
+
+=== MATCH 6 ===
+class="ltx_tag ltx_tag_item">•</span> 
+<div id="S1.I1.i3.p1" class="ltx_para ltx_noindent">
+<p id="S1.I1.i3.p1.1" class="ltx_p"><span id="S1.I1.i3.p1.1.1" class="ltx_text ltx_font_bold">Feature-level Counterfactual Intervention.</span> We propose a bottleneck-based intervention mechanism that perturbs latent AU features directly, eliminating the need for image-level synthesis and its associated complexity. This design enables efficient and scalable counterfactual reasoning, while injecting causal supervision to promote structurally meaningful dependency learning.</p>
+</div></li>
+<li id="S1.I1.
+
+=== MATCH 7 ===
+leneck-based intervention mechanism that perturbs latent AU features directly, eliminating the need for image-level synthesis and its associated complexity. This design enables efficient and scalable counterfactual reasoning, while injecting causal supervision to promote structurally meaningful dependency learning.</p>
+</div></li>
+<li id="S1.I1.i4" class="ltx_item" style="list-style-type:none;"><span class="ltx_tag ltx_tag_item">•</span> 
+<div id="S1.I1.i4.p1" class="ltx_para">
+<p id="S1.I1.i4.p1.1" class="ltx_p"><span id="S1.I1.i4.p1.1.1" class="ltx_text ltx_font_bold">State-of-the-Art Perfor
+
+=== MATCH 8 ===
+</span>Related Work</h2>
+
+<div id="S2.p1" class="ltx_para ltx_noindent">
+<p id="S2.p1.1" class="ltx_p">Existing work on facial affect analysis explores both structured relation modeling and causal or counterfactual reasoning, but each direction has notable limitations. Prior methods model AU–AU and AU–expression dependencies using expert-curated FACS rules <cite class="ltx_cite ltx_citemacro_citep">(<a href="#bib.bib35" title="" class="ltx_ref">Ekman and Friesen, 1978</a>; <a href="#bib.bib50" title="" class="ltx_ref">Du et al., 2014</a>)</cite> or data-driven graph and attention architectures
+
+=== MATCH 9 ===
+ title="" class="ltx_ref">Chen and Joo, 2021</a>; <a href="#bib.bib73" title="" class="ltx_ref">Dominguez-Catena et al., 2024</a>)</cite> and require joint AU–expression labels. Meanwhile, causal and counterfactual models in computer vision <cite class="ltx_cite ltx_citemacro_citep">(<a href="#bib.bib74" title="" class="ltx_ref">Cheong et al., 2022</a>; <a href="#bib.bib75" title="" class="ltx_ref">Chen et al., 2022</a>; <a href="#bib.bib77" title="" class="ltx_ref">Li et al., 2024c</a>; <a href="#bib.bib76" title="" class="ltx_ref">Pan and Bareinboim, 2024</a>)</cite> predominantly intervene 
+
+=== MATCH 10 ===
+cted, polarity-aware, and sample-adaptive causal reasoning. Our work differs by performing causal discovery, enabling weakly supervised multi-dataset learning, and introducing efficient feature-level counterfactual interventions in a disentangled AU latent space.</p>
+</div>
+</section>
+<section id="S3" class="ltx_section">
+<h2 class="ltx_title ltx_title_section"><span class="ltx_tag ltx_tag_section">3 </span>Problem Formulation</h2>
+
+<div id="S3.p1" class="ltx_para ltx_noindent">
+<p id="S3.p1.1" class="ltx_p">The objective is to uncover <em id="S3.p1.1.1" class="ltx_emph ltx_font_italic">causal
+
+=== MATCH 11 ===
+_font_bold">Sample-Adaptive Graph Refinement</span>, which adjusts the global graph for each instance via residual adaptation; and (4) <span id="S3.F1.11" class="ltx_text ltx_font_bold">Feature-Level Counterfactual Intervention</span>, which enforces causal inductive bias through latent perturbations and factual–counterfactual consistency. The figure illustrates the AU<math id="S3.F1.m3" class="ltx_Math" alttext="\rightarrow" display="inline" intent=":literal"><semantics><mo stretchy="false">→</mo><annotation encoding="application/x-tex">\rightarrow</annotation></semantics></math>AU branch; th
+
+=== MATCH 12 ===
+ adaptation; and (4) <span id="S3.F1.11" class="ltx_text ltx_font_bold">Feature-Level Counterfactual Intervention</span>, which enforces causal inductive bias through latent perturbations and factual–counterfactual consistency. The figure illustrates the AU<math id="S3.F1.m3" class="ltx_Math" alttext="\rightarrow" display="inline" intent=":literal"><semantics><mo stretchy="false">→</mo><annotation encoding="application/x-tex">\rightarrow</annotation></semantics></math>AU branch; the AU<math id="S3.F1.m4" class="ltx_Math" alttext="\rightarrow" display="inline" intent=":literal"><semantics><mo s
+
+=== MATCH 13 ===
+nt, this stage removes confounders, suppresses correlated noise, and enables both the construction of meaningful AU–AU and AU–Expression causal structures and the execution of effective feature-level counterfactual interventions.</p>
+</div>
+<div id="S4.SS1.p2" class="ltx_para ltx_noindent">
+<p id="S4.SS1.p2.1" class="ltx_p">To achieve this, we first obtain global visual features from the input image <math id="S4.SS1.p2.m1" class="ltx_Math" alttext="I" display="inline" intent=":literal"><semantics><mi>I</mi><annotation encoding="application/x-tex">I</annotation></semantics></math> and then proj
+
+=== MATCH 14 ===
+antics></math>AU graph.</p>
+</div>
+</section>
+<section id="S4.SS4" class="ltx_subsection">
+<h3 class="ltx_title ltx_title_subsection"><span class="ltx_tag ltx_tag_subsection">4.4 </span>Feature-level Counterfactual Intervention</h3>
+
+<div id="S4.SS4.p1" class="ltx_para ltx_noindent">
+<p id="S4.SS4.p1.1" class="ltx_p">While the global and sample-adaptive graphs capture structural dependencies, they may still encode spurious correlations. To enforce relationships that are truly <span id="S4.SS4.p1.1.1" class="ltx_text ltx_font_italic">causal</span> rather than merely <span id="S4.SS4.p1.1.2" cla
+
+=== MATCH 15 ===
+">causal</span> rather than merely <span id="S4.SS4.p1.1.2" class="ltx_text ltx_font_italic">correlational</span>, we introduce a <span id="S4.SS4.p1.1.3" class="ltx_text ltx_font_bold">Feature-level Counterfactual Intervention (CF)</span> module. The core principle is that if a source node genuinely exerts a causal influence on a target, then intervening on the source should induce a meaningful change in the target’s representation and prediction, whereas intervening on non-causal nodes should produce little to no effect.</p>
+</div>
+<div id="S4.SS4.p2" class="ltx_para ltx_noindent">
+<p id="S4
+
+=== MATCH 16 ===
+1" class="ltx_p">We realize this via a thresholded soft mask with edge-aware saliency,
+which perturbs source node embeddings conditioned on the graph.
+By contrasting model behaviors under factual and counterfactual conditions, the model receives consistency and discrepancy signals that guide graph refinement, reinforcing informative edges and suppressing spurious ones.
+Specifically, given a graph edge matrix
+<math id="S4.SS4.p2.m1" class="ltx_Math" alttext="\mathcal{E}\in(-1,1)^{N_{\text{target}}\times N_{\text{source}}}" display="inline" intent=":literal"><semantics><mrow><mi class="ltx_font_
+
+=== MATCH 17 ===
+etchy="false">)</mo></mrow></msup></mrow><annotation encoding="application/x-tex">\smash{\mathbf{m}_{\text{discrep}}^{(j)}}=\mathbf{m}^{(j)}</annotation></semantics></math>, which masks causal nodes.
+Counterfactual interventions are implemented by injecting Gaussian perturbations:</p>
+<table id="S4.E12" class="ltx_equation ltx_eqn_table">
+
+<tbody><tr class="ltx_equation ltx_eqn_row ltx_align_baseline">
+<td class="ltx_eqn_cell ltx_eqn_center_padleft"></td>
+<td class="ltx_eqn_cell ltx_align_center"><math id="S4.E12.m1" class="ltx_math_unparsed" alttext="\mathbf{F}_{\text{AU-CF}}^{(j,\star)}=\mat
+
+=== MATCH 18 ===
+no ltx_align_middle ltx_align_right"><span class="ltx_tag ltx_tag_equation ltx_align_right">(12)</span></td></tr></tbody>
+</table>
+<p id="S4.SS4.p2.3" class="ltx_p">executing graph aggregation yields counterfactual target node representations <math id="S4.SS4.p2.m11" class="ltx_Math" alttext="Z_{\text{CF}}^{(j,\star)}" display="inline" intent=":literal"><semantics><msubsup><mi>Z</mi><mtext>CF</mtext><mrow><mo stretchy="false">(</mo><mi>j</mi><mo rspace="0em">,</mo><mo lspace="0em" rspace="0em">⋆</mo><mo stretchy="false">)</mo></mrow></msubsup><annotation encoding="application/x-tex">Z_{\text{C
+
+=== MATCH 19 ===
+tation></semantics></math> is a logit-level discrepancy (MSE for AU, KL divergence for expression).</p>
+</div>
+<div id="S4.SS4.p4" class="ltx_para ltx_noindent">
+<p id="S4.SS4.p4.1" class="ltx_p">The counterfactual intervention loss, weighted by <math id="S4.SS4.p4.m1" class="ltx_Math" alttext="\lambda_{\text{consist}}" display="inline" intent=":literal"><semantics><msub><mi>λ</mi><mtext>consist</mtext></msub><annotation encoding="application/x-tex">\lambda_{\text{consist}}</annotation></semantics></math> and <math id="S4.SS4.p4.m2" class="ltx_Math" alttext="\lambda_{\text{discrep}}" display="
+
+=== MATCH 20 ===
+ of different modules. The GC captures stable population-level dependencies, while the SAC Graph introduces context-adaptive flexibility. Disentanglement provides psychologically meaningful features. Counterfactual further prunes spurious associations but only becomes effective when disentangled representations are available. Finally, the DAG constraint ensures structural clarity and interpretability. (More analysis in <span id="S5.SS4.p1.1.1" class="ltx_text ltx_font_bold">Appendix A</span>)</p>
+</div>
+<figure id="S5.T3" class="ltx_table">
+<div id="S5.T3.2" class="ltx_inline-block ltx_align_c
+
+=== MATCH 21 ===
+tx_centering"><span class="ltx_tag ltx_tag_table">Table 3: </span>
+Ablation Study on CausalAffect (+All Setting), exploring the effect of Global Causal Graph (GC), Sample-Adaptive Causal Graph (SAC), Counterfactual Intervention (CF), and AU Disentanglement (Dis).
+</figcaption>
+</figure>
+</section>
+</section>
+<section id="Sx1" class="ltx_section">
+<h2 class="ltx_title ltx_title_section">Conclusion</h2>
+
+<div id="Sx1.p1" class="ltx_para ltx_noindent">
+<p id="Sx1.p1.1" class="ltx_p">We presented CausalAffect, a weakly supervised framework for discovering <em id="Sx1.p1.1.1" class="ltx_emph ltx_fo
+
+=== MATCH 22 ===
+ample-adaptive</em> causal relations among facial AUs and between AUs and expressions. By jointly constructing a population-level global graph and a sample-adaptive graph, and by enforcing node-level counterfactual interventions, our method recovers psychologically plausible structures that align with established cognitive studies while also uncovering inhibitory pathways and novel relations. Across six benchmarks, CausalAffect advances the state of the art in both AU detection and expression recognition, yielding human-aligned and interpretable causal graphs.</p>
+</div>
+</section>
+<section id
+
+=== MATCH 23 ===
+/span> (2022)</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_author">J. Cheong, S. Kalkan, and H. Gunes</span>
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_title">Counterfactual fairness for facial expression recognition</span>.
+</span>
+<span class="ltx_bibblock">In <span class="ltx_text ltx_bib_inbook">European Conference on Computer Vision</span>,
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_pages">pp. 245–261</span>.
+</span>
+<span class="ltx_bibblock ltx_bib_cited">Cited by: <a href="#S1.p3.1" title="1 Introduction ‣ CausalAffect: Cau
+
+=== MATCH 24 ===
+024c)</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_author">Y. Li, M. Liu, L. Lao, Y. Wang, and Z. Cui</span>
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_title">Counterfactual discriminative micro-expression recognition</span>.
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_journal">Visual Intelligence</span> <span class="ltx_text ltx_bib_volume">2</span> (<span class="ltx_text ltx_bib_number">1</span>), <span class="ltx_text ltx_bib_pages">pp. 29</span>.
+</span>
+<span class="ltx_bibblock ltx_bib_cited">Cited by: <a href="#S2.p1.1" title
+
+=== MATCH 25 ===
+pan>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_author">W. Liu, X. Shi, and X. Liu</span>
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_title">Flipping consistent and counterfactual attention network for facial expression recognition</span>.
+</span>
+<span class="ltx_bibblock">In <span class="ltx_text ltx_bib_inbook">ICASSP 2024-2024 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)</span>,
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_pages">pp. 2665–2669</span>.
+</span>
+<span class="ltx_bibblock ltx_bib_cited"
+
+=== MATCH 26 ===
+elistas, N. Spyrou, N. Gkouti, P. Sanchez, A. Vlontzos, Y. Panagakis, G. Papanastasiou, and S. A. Tsaftaris</span>
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_title">Benchmarking counterfactual image generation</span>.
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_journal">Advances in Neural Information Processing Systems</span> <span class="ltx_text ltx_bib_volume">37</span>, <span class="ltx_text ltx_bib_pages">pp. 133207–133230</span>.
+</span>
+<span class="ltx_bibblock ltx_bib_cited">Cited by: <a href="#S2.p1.1" title="2 Related Work ‣ CausalAffect: C
+
+=== MATCH 27 ===
+n and Bareinboim (2024)</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_author">Y. Pan and E. Bareinboim</span>
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_title">Counterfactual image editing</span>.
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_journal">arXiv preprint arXiv:2403.09683</span>.
+</span>
+<span class="ltx_bibblock ltx_bib_cited">Cited by: <a href="#S2.p1.1" title="2 Related Work ‣ CausalAffect: Causal Discovery for Facial Affective Understanding" class="ltx_ref"><span class="ltx_text ltx_ref_tag">§2</span></a>.
+</span></li>
+<
+
+=== MATCH 28 ===
+="ltx_bibblock"><span class="ltx_text ltx_bib_author">G. V. Ramesh, H. Rosenberg, A. Hooda, and S. A. K. Fawaz</span>
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_title">Synthetic counterfactual faces</span>.
+</span>
+<span class="ltx_bibblock"><span class="ltx_text ltx_bib_journal">arXiv preprint arXiv:2407.13922</span>.
+</span>
+<span class="ltx_bibblock ltx_bib_cited">Cited by: <a href="#S1.p3.1" title="1 Introduction ‣ CausalAffect: Causal Discovery for Facial Affective Understanding" class="ltx_ref"><span class="ltx_text ltx_ref_tag">§1</span></a>,
+<a href="#S2.p1.1" tit
+

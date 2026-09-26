@@ -68,10 +68,16 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
                 msg += f", L_wa: {running_losses['loss_wa'] / num_batches:.4f}"
             if "loss_we" in running_losses:
                 msg += f", L_we: {running_losses['loss_we'] / num_batches:.4f}"
-            if "loss_contrastive" in running_losses and running_losses['loss_contrastive'] > 0:
-                msg += f", L_clip: {running_losses['loss_contrastive'] / num_batches:.4f}"
+            if "loss_ib" in running_losses:
+                msg += f", L_ib: {running_losses['loss_ib'] / num_batches:.4f}"
+            if "loss_align" in running_losses:
+                msg += f", L_align: {running_losses['loss_align'] / num_batches:.4f}"
             if "loss_decorr" in running_losses and running_losses['loss_decorr'] > 0:
                 msg += f", L_decorr: {running_losses['loss_decorr'] / num_batches:.4f}"
+            if "loss_contrastive" in running_losses and running_losses['loss_contrastive'] > 0:
+                msg += f", L_clip_au: {running_losses['loss_contrastive'] / num_batches:.4f}"
+            if "loss_emo_contrastive" in running_losses and running_losses['loss_emo_contrastive'] > 0:
+                msg += f", L_clip_exp: {running_losses['loss_emo_contrastive'] / num_batches:.4f}"
             if "loss_facs_au" in running_losses and running_losses['loss_facs_au'] > 0:
                 msg += f", L_facs: {running_losses['loss_facs_au'] / num_batches:.4f}"
             print(msg)

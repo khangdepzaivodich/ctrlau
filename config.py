@@ -117,8 +117,9 @@ class ModelConfig:
     # Learnable threshold
     threshold_init = 0.5           # initial sigmoid pre-activation for mask threshold
     
-    # Counterfactual perturbation
+    # Counterfactual perturbation (CausalAffect Eq. 11-15)
     noise_std = 0.1                # Gaussian noise std for perturbation
+    cf_gamma = 5.0                 # Sharpness factor for soft mask sigmoid
     
     
     # Loss weights: Feature Extraction & Regularizers (Phase 1, 2, 3)
