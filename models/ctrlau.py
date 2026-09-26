@@ -169,6 +169,7 @@ class CtrlAUModel(nn.Module):
         self.dag_loss = DAGLoss(num_nodes=NUM_AUS)
         self.violation_loss = ViolationLoss()
         self.facs_emotion_violation_loss = FACSEmotionViolationLoss()
+        self.facs_au_violation_loss = FACSAUViolationLoss()
         # ---- Counterfactual Loss modules (Level 1: AU-AU, Level 2: AU-Exp) ----
         self.cf_loss = CounterfactualLoss() # backward compatibility
         self.cf_loss_au = CounterfactualLoss(is_expression=False)
