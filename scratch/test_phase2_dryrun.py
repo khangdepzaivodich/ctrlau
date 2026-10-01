@@ -126,7 +126,7 @@ def test_phase1_to_phase2():
     model_p2.cfg.lambda_decorr = 0.0
     model_p2.cfg.lambda_contrastive = 0.0
     model_p2.cfg.lambda_emo_contrastive = 0.0
-    model_p2.cfg.lambda_facs_au = 0.0
+    model_p2.cfg.lambda_facs_au = 0.1
     
     model_p2.cfg.lambda_au_au = 1.0
     model_p2.cfg.lambda_graph_au = 1.0
@@ -134,6 +134,7 @@ def test_phase1_to_phase2():
     model_p2.cfg.lambda_dag = 0.1
     model_p2.cfg.lambda_causal_au = 0.1
     model_p2.cfg.lambda_causal_exp = 0.1
+    model_p2.cfg.lambda_facs_au = 0.1
     model_p2.cfg.lambda_facs_exp = 0.1
     model_p2.cfg.lambda_cf_important = 0.1
     model_p2.cfg.lambda_cf_unimportant = 0.1
@@ -145,6 +146,7 @@ def test_phase1_to_phase2():
     for k in sorted(losses_p2.keys()):
         print(f"    {k:<24}: {losses_p2[k].item():.4f}")
         
+    assert "loss_facs_au" in losses_p2
     assert "loss_facs_exp" in losses_p2
     assert "loss_dag" in losses_p2
     assert "loss_causal_au" in losses_p2

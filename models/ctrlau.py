@@ -18,7 +18,8 @@ from config import (
 from losses import (
     HSICDisentanglementLoss, ContrastiveLoss, DAGLoss,
     ViolationLoss, FACSEmotionViolationLoss, CounterfactualLoss, FocalLoss,
-    FACSAUViolationLoss, WeightedAsymmetricLoss, ExpressionBCELoss
+    FACSAUViolationLoss, WeightedAsymmetricLoss, ExpressionBCELoss,
+    CausalCycleLoss
 )
 from .text_encoder import TextEncoder
 from .gat import AUGraphModule
@@ -45,7 +46,7 @@ class CtrlAUModel(nn.Module):
     8. CtrlAU Regularizers:
        - HSIC Disentanglement: L_ib, L_align, L_decorr
        - CLIP Text-Visual Contrastive: L_contrastive (AUs) + L_emo_contrastive (Emotions)
-       - FACS AU Violation: L_facs_au (mutual exclusion AU25/AU26, AU9 subsumption)
+       - FACS AU Violation: L_facs_au (evaluates anatomical constraints; disabled for DISFA 8-AU subset)
     9. Phase 1 Total Loss = L_wa + 0.05 * L_we + CtrlAU regularizers
     
     Phase 2 (Graph Learning & Relational Reasoning):
@@ -174,6 +175,7 @@ class CtrlAUModel(nn.Module):
         self.cf_loss = CounterfactualLoss() # backward compatibility
         self.cf_loss_au = CounterfactualLoss(is_expression=False)
         self.cf_loss_exp = CounterfactualLoss(is_expression=True)
+        self.cycle_loss = CausalCycleLoss()
         
         # ---- Counterfactual mask thresholds (learnable) ----
         self.cf_threshold = nn.Parameter(torch.tensor(0.5))
@@ -531,17 +533,41 @@ class CtrlAUModel(nn.Module):
             )
             losses["loss_causal_exp"] = loss_causal_exp
             
-            # 5. FACS AU-Emotion Hypergraph Loss
+            # 5. FACS AU Rule Violation Loss on AU-AU Graph & Final Graph
+            loss_facs_au_au = self.facs_au_violation_loss(au_au_probs)
+            loss_facs_graph_au = self.facs_au_violation_loss(graph_au_probs)
+            loss_facs_au = 0.5 * (loss_facs_au_au + loss_facs_graph_au)
+            losses["loss_facs_au"] = loss_facs_au
+            losses["loss_facs_au_au"] = loss_facs_au_au
+            losses["loss_facs_graph_au"] = loss_facs_graph_au
+            
+            # 6. FACS AU-Emotion Hypergraph Loss
             loss_facs_exp = self.facs_emotion_violation_loss(
                 graph_au_probs, graph_emo_probs
             )
             losses["loss_facs_exp"] = loss_facs_exp
             
-            # 6. Hierarchical Counterfactual Intervention (4 Losses across Level 1 & Level 2)
-            # Following CausalAffect (Hu et al. arXiv:2512.00456, Section 4.4 & 4.5, Eqs. 11-16)
+            # 7. Hierarchical Counterfactual Intervention (4 Losses across Level 1 & Level 2)
+            # Following Idea 1: Semantic Counterfactual Interventions via CLIP Subspace Nulling
             gamma_cf = getattr(self.cfg, "cf_gamma", 5.0)
-            sparsity_scale = (self.au_pos_weights / self.au_pos_weights.mean()).view(1, 1, -1, 1) # (1, 1, NUM_AUS, 1)
-            noise_base = torch.randn(B, 1, NUM_AUS, self.cfg.au_embed_dim, device=device) * (self.cfg.noise_std * sparsity_scale)
+            
+            # Extract text embeddings and normalize for projection
+            text_emb_au = self._get_text_embeddings(device=device) # (NUM_AUS, D_text)
+            text_proj_au = self.text_proj(text_emb_au) # (NUM_AUS, D_vis)
+            
+            # Idea 1.1: Semantic Basis Orthogonalization (Gram-Schmidt)
+            # This ensures that nulling one AU doesn't accidentally erase correlated AUs
+            ortho_basis = torch.zeros_like(text_proj_au)
+            for i in range(NUM_AUS):
+                v_i = text_proj_au[i].clone()
+                for j in range(i):
+                    # Project v_i onto ortho_basis[j]
+                    proj_v_i = (v_i * ortho_basis[j]).sum() * ortho_basis[j]
+                    v_i = v_i - proj_v_i
+                ortho_basis[i] = F.normalize(v_i, dim=-1)
+                
+            text_proj_norm = ortho_basis
+            text_proj_exp = text_proj_norm.view(1, 1, NUM_AUS, -1) # (1, 1, NUM_AUS, D_vis)
             
             # =========================================================
             # LEVEL 1: AU-AU Graph Counterfactual Intervention (Losses 1 & 2)
@@ -556,9 +582,12 @@ class CtrlAUModel(nn.Module):
             m_discrep_exp_1 = m_discrep_au.unsqueeze(0).unsqueeze(-1) # (1, NUM_AUS, NUM_AUS, 1)
             m_consist_exp_1 = m_consist_au.unsqueeze(0).unsqueeze(-1)
             
-            # Perturb source AUs for each target AU j
-            au_imp_all_1 = (au_expanded_1 + noise_base * m_discrep_exp_1).view(B * NUM_AUS, NUM_AUS, -1)
-            au_unimp_all_1 = (au_expanded_1 + noise_base * m_consist_exp_1).view(B * NUM_AUS, NUM_AUS, -1)
+            # Idea 1: Project visual onto text and subtract (directional anatomical erasure)
+            proj_1 = (au_expanded_1 * text_proj_exp).sum(dim=-1, keepdim=True) * text_proj_exp
+            
+            # Perturb source AUs for each target AU j by erasing semantic features
+            au_imp_all_1 = (au_expanded_1 - proj_1 * m_discrep_exp_1).view(B * NUM_AUS, NUM_AUS, -1)
+            au_unimp_all_1 = (au_expanded_1 - proj_1 * m_consist_exp_1).view(B * NUM_AUS, NUM_AUS, -1)
             
             # Forward perturbed representations through AU-AU GAT
             up_nodes_imp_1, _ = self.graph_module.forward_au_au(au_imp_all_1)
@@ -599,9 +628,10 @@ class CtrlAUModel(nn.Module):
             m_discrep_exp_2 = m_discrep_exp.unsqueeze(0).unsqueeze(-1) # (1, 7, 8, 1)
             m_consist_exp_2 = m_consist_exp.unsqueeze(0).unsqueeze(-1)
             
-            # Perturb source AUs for each target Emotion k
-            au_imp_all_2 = (au_expanded_2 + noise_base * m_discrep_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
-            au_unimp_all_2 = (au_expanded_2 + noise_base * m_consist_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
+            # Perturb source AUs for each target Emotion k by erasing semantic features
+            proj_2 = (au_expanded_2 * text_proj_exp).sum(dim=-1, keepdim=True) * text_proj_exp
+            au_imp_all_2 = (au_expanded_2 - proj_2 * m_discrep_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
+            au_unimp_all_2 = (au_expanded_2 - proj_2 * m_consist_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
             
             emo_repeat_2 = emotion_emb_stacked.unsqueeze(1).expand(-1, self.num_emotions, -1, -1).reshape(B * self.num_emotions, self.num_emotions, -1)
             
@@ -635,6 +665,10 @@ class CtrlAUModel(nn.Module):
             losses["loss_cf_important"] = loss_cf_imp
             losses["loss_cf_unimportant"] = loss_cf_unimp
             
+            # Idea 4: Cross-Task Bidirectional Causal Cycle Consistency
+            loss_cycle = self.cycle_loss(graph_emo_probs, graph_au_probs)
+            losses["loss_cycle"] = loss_cycle
+            
             # Phase 2 Total Loss: Pure Graph & Hierarchical Causal Reasoning (Eq. 16)
             cfg = self.cfg
             w_cf_au_imp = getattr(cfg, "lambda_cf_au_imp", cfg.lambda_cf_important)
@@ -649,14 +683,45 @@ class CtrlAUModel(nn.Module):
                 cfg.lambda_dag * loss_dag +
                 cfg.lambda_causal_au * loss_causal_au +
                 cfg.lambda_causal_exp * loss_causal_exp +
+                cfg.lambda_facs_au * loss_facs_au +
                 cfg.lambda_facs_exp * loss_facs_exp +
+                cfg.lambda_cycle * loss_cycle +
                 w_cf_au_imp * loss_cf_au_imp +
                 w_cf_au_unimp * loss_cf_au_unimp +
                 w_cf_exp_imp * loss_cf_exp_imp +
                 w_cf_exp_unimp * loss_cf_exp_unimp
             )
             losses["total_loss"] = total_loss
-        
+        # ============================================================
+        # Test-Time Symbolic Energy Minimization (Abductive Inference)
+        # ============================================================
+        if not self.training:
+            with torch.enable_grad():
+                refined_au_logits = graph_au_logits.detach().clone().requires_grad_(True)
+                refined_emo_logits = graph_emo_logits.detach().clone().requires_grad_(True)
+                
+                optimizer = torch.optim.Adam([refined_au_logits, refined_emo_logits], lr=0.05)
+                
+                for _ in range(15):
+                    optimizer.zero_grad()
+                    p_au = torch.sigmoid(refined_au_logits)
+                    p_emo = torch.sigmoid(refined_emo_logits)
+                    
+                    e_au = self.facs_au_violation_loss(p_au)
+                    e_exp = self.facs_emotion_violation_loss(p_au, p_emo)
+                    e_prior = F.mse_loss(refined_au_logits, graph_au_logits.detach()) + \
+                              F.mse_loss(refined_emo_logits, graph_emo_logits.detach())
+                              
+                    energy = e_au + e_exp + 0.1 * e_prior
+                    if energy.item() < 1e-5:
+                        break
+                        
+                    energy.backward()
+                    optimizer.step()
+                    
+                graph_au_probs = torch.sigmoid(refined_au_logits).detach()
+                graph_emo_probs = torch.sigmoid(refined_emo_logits).detach()
+
         return {
             "au_embeddings": au_embeddings,
             "au_logits": au_logits,

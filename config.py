@@ -90,6 +90,14 @@ for emo, rule in EMOTION_AU_RULES.items():
     desc_list = [AU_DESCRIPTIONS[au] for au in rule["required_aus"]]
     EMOTION_DESCRIPTIONS[emo] = f"A facial expression of {emo}, characterized by: " + " and ".join(desc_list)
 
+# Build M_AE matrix mapping Emotions to AUs for Cycle Consistency
+import numpy as np
+M_AE = np.zeros((NUM_EMOTIONS, NUM_AUS), dtype=np.float32)
+for i, emo in enumerate(EMOTIONS):
+    if emo in EMOTION_AU_RULES_IDX:
+        for au_idx in EMOTION_AU_RULES_IDX[emo]["required_idx"]:
+            M_AE[i, au_idx] = 1.0
+
 
 # ============================================================
 # Model hyperparameters
@@ -130,7 +138,8 @@ class ModelConfig:
     lambda_decorr = 1e-2           # HSIC cross-AU decorrelation
     lambda_contrastive = 0.05      # Text-visual contrastive loss for AUs (masked to y=1)
     lambda_emo_contrastive = 0.05  # Text-visual contrastive loss for Emotions (masked to y=1)
-    lambda_facs_au = 0.0           # FACS anatomical rules on AU probabilities (disabled for DISFA)
+    lambda_facs_au = 0.1           # FACS anatomical rules on AU probabilities (AU26 -> AU25, etc.)
+    lambda_cycle = 0.1             # Cross-Task Bidirectional Causal Cycle Consistency (Idea 4)
     
     # Loss weights: Graph, Causal DAG & Counterfactual Reasoning (Phase 2 & 3)
     lambda_au_au = 1.0             # Intermediate AU-AU graph classification loss

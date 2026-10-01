@@ -458,9 +458,22 @@ class CounterfactualLoss(nn.Module):
 
 class FACSAUViolationLoss(nn.Module):
     """
-    Computes violation of strict FACS anatomical rules between AUs using Fuzzy Logic (T-norms).
-    Note: Contradictory rules (AU25 XOR AU26 and AU9 subsumption) have been removed
-    because empirical DISFA annotations exhibit 72.1% co-occurrence between AU25 and AU26.
+    Computes violation of strict FACS anatomical and semantic rules between AUs using Fuzzy Logic (T-norms).
+    Based on FACS 2002 standard rules in facs_au_rules.md:
+    
+    1. Additive Hierarchy / Implication:
+       - Jaw Drop implies Lips Part: AU 26 -> AU 25
+         Violation = p(AU 26) * (1 - p(AU 25))
+       - Mouth Stretch implies Lips Part & Jaw Drop: AU 27 -> AU 25, AU 27 -> AU 26
+         Violation = p(AU 27) * (1 - p(AU 25)) + p(AU 27) * (1 - p(AU 26))
+         
+    2. Mutually Exclusive Rules (XOR):
+       - AU 24 XOR AU 25 (Lip Pressor vs Lips Part)
+         Violation = p(AU 24) * p(AU 25)
+       - AU 45 XOR AU 46 (Blink vs Wink)
+       - AU 41 XOR AU 42 XOR AU 43 (Lid Droop / Slit / Closed)
+       - Opposing head rotations (AU 51/52, 53/54, 55/56)
+       - Opposing conjugate gaze (AU 61/62, 63/64)
     """
     def __init__(self):
         super().__init__()
@@ -470,10 +483,60 @@ class FACSAUViolationLoss(nn.Module):
         Args:
             au_probs: (B, N_AU) predicted AU probabilities
         Returns:
-            violation_loss: scalar sum of valid rule violations (0.0 for DISFA 8-AU subset)
+            violation_loss: scalar sum of all rule violations
         """
         device = au_probs.device
-        return torch.tensor(0.0, device=device)
+        loss = torch.tensor(0.0, device=device)
+        from config import AU_INDEX
+        
+        def get_p(au_num):
+            if au_num in AU_INDEX:
+                return au_probs[:, AU_INDEX[au_num]]
+            return None
+            
+        p_25 = get_p(25)
+        p_26 = get_p(26)
+        p_24 = get_p(24)
+        p_27 = get_p(27)
+        
+        # 1. Additive Hierarchy / Implication (Jaw Drop physically parts lips)
+        # Rule: AU 26 -> AU 25 (p(AU25) >= p(AU26))
+        # Fuzzy violation: p(AU26) AND NOT p(AU25)
+        if p_26 is not None and p_25 is not None:
+            loss = loss + (p_26 * (1.0 - p_25)).mean()
+            
+        # Mouth Stretch implies Lips Part & Jaw Drop
+        if p_27 is not None and p_25 is not None:
+            loss = loss + (p_27 * (1.0 - p_25)).mean()
+        if p_27 is not None and p_26 is not None:
+            loss = loss + (p_27 * (1.0 - p_26)).mean()
+            
+        # 2. Mutually Exclusive Rules (XOR)
+        # AU 24 XOR AU 25
+        if p_24 is not None and p_25 is not None:
+            loss = loss + (p_24 * p_25).mean()
+            
+        # AU 45 XOR AU 46
+        p_45, p_46 = get_p(45), get_p(46)
+        if p_45 is not None and p_46 is not None:
+            loss = loss + (p_45 * p_46).mean()
+            
+        # AU 41, 42, 43
+        p_41, p_42, p_43 = get_p(41), get_p(42), get_p(43)
+        if p_41 is not None and p_42 is not None:
+            loss = loss + (p_41 * p_42).mean()
+        if p_41 is not None and p_43 is not None:
+            loss = loss + (p_41 * p_43).mean()
+        if p_42 is not None and p_43 is not None:
+            loss = loss + (p_42 * p_43).mean()
+            
+        # Opposing head and eye pairs
+        for a, b in [(51, 52), (53, 54), (55, 56), (61, 62), (63, 64)]:
+            pa, pb = get_p(a), get_p(b)
+            if pa is not None and pb is not None:
+                loss = loss + (pa * pb).mean()
+                
+        return loss
 
 
 
@@ -547,4 +610,54 @@ class ExpressionBCELoss(nn.Module):
         loss = los_pos + los_neg
         loss = loss.mean(dim=-1)
         return -loss.mean()
+
+
+# ============================================================
+# Causal Cycle Consistency Loss (Idea 4)
+# ============================================================
+
+class CausalCycleLoss(nn.Module):
+    """
+    Idea 4: Cross-Task Bidirectional Causal Cycle Consistency.
+    Projects predicted expressions back to expected AU activations via the transposed M_AE matrix.
+    Adds a top-down cycle loss to ensure the hierarchical predictions are consistent.
+    """
+    def __init__(self):
+        super().__init__()
+        from models.symgraphau import M_AE_DISFA
+        self.register_buffer("M_AE", M_AE_DISFA.t().clone().detach().float())
+
+    def forward(self, emotion_probs, au_probs):
+        """
+        Args:
+            emotion_probs: (B, N_EMO)
+            au_probs: (B, N_AU)
+        """
+        # M_AE is (N_EMO, N_AU), where 1 means emotion involves AU
+        # To project from Emotion down to AU, we say an AU is expected to be active
+        # if ANY of the active emotions require it.
+        # Probabilistic OR: P(A U B) = 1 - (1 - P(A))(1 - P(B))
+        # Expected AU prob: 1 - \prod_e (1 - M_AE[e, a] * P_e)
+        
+        # Expand dims for broadcasting
+        # emotion_probs: (B, N_EMO, 1)
+        e_probs = emotion_probs.unsqueeze(-1)
+        # M_AE: (1, N_EMO, N_AU)
+        m_ae = self.M_AE.unsqueeze(0)
+        
+        # Effective prob contribution from each emotion to each AU
+        effective_p = e_probs * m_ae  # (B, N_EMO, N_AU)
+        
+        # Prob of AU NOT being activated by each emotion
+        not_active_p = 1.0 - effective_p  # (B, N_EMO, N_AU)
+        
+        # Prob of AU NOT being activated by ANY emotion
+        not_active_any_p = not_active_p.prod(dim=1)  # (B, N_AU)
+        
+        # Expected AU prob
+        expected_au_probs = 1.0 - not_active_any_p  # (B, N_AU)
+        
+        # Cycle Consistency Loss: force predicted AUs to match Expected AUs
+        # We use MSE
+        return F.mse_loss(au_probs, expected_au_probs)
 

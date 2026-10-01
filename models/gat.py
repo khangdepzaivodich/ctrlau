@@ -8,13 +8,60 @@ import torch.nn.functional as F
 from torch_geometric.nn import GATConv
 
 
+class DenseDynamicGraphConv(nn.Module):
+    """
+    Custom Dense Graph Convolution that implements Sample-Adaptive Causal Routing (Idea 2).
+    Combines a dynamic sample-adaptive affinity matrix (via Q-K self-attention) with a 
+    globally learned, invariant adjacency graph.
+    """
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.W_q = nn.Linear(in_dim, out_dim)
+        self.W_k = nn.Linear(in_dim, out_dim)
+        self.W_v = nn.Linear(in_dim, out_dim)
+        self.out_proj = nn.Linear(out_dim, out_dim)
+        
+    def forward(self, x, global_adj_logits):
+        """
+        Args:
+            x: (B, N, D) node features
+            global_adj_logits: (N, N) learned global adjacency logits
+        Returns:
+            out: (B, N, D) updated node features
+        """
+        Q = self.W_q(x)  # (B, N, D')
+        K = self.W_k(x)  # (B, N, D')
+        V = self.W_v(x)  # (B, N, D')
+        
+        # 1. Sample-Adaptive Dynamic Affinity (Scaled Dot-Product)
+        d_k = Q.size(-1)
+        dynamic_logits = torch.matmul(Q, K.transpose(1, 2)) / (d_k ** 0.5)  # (B, N, N)
+        dynamic_adj = torch.sigmoid(dynamic_logits)  # Sample-specific edge probabilities
+        
+        # 2. Global Invariant Graph
+        global_adj = torch.sigmoid(global_adj_logits)  # (N, N)
+        
+        # 3. Combine Static and Dynamic Adjacencies
+        # We element-wise multiply the global DAG probabilities with the dynamic affinities
+        combined_adj = global_adj.unsqueeze(0) * dynamic_adj  # (B, N, N)
+        
+        # Row-normalize (like standard attention/GCN)
+        combined_adj = combined_adj / (combined_adj.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        # 4. Message Passing
+        out = torch.matmul(combined_adj, V)  # (B, N, D')
+        out = F.elu(self.out_proj(out))
+        return out
+
+
 class AUGraphModule(nn.Module):
     """
-    Constructs two graphs via GAT:
+    Constructs two graphs via DenseDynamicGraphConv:
     1. AU-AU graph: models relationships between AU embeddings
     2. AU-Expression graph: models relationships between AU and Expression embeddings
     
-    Each graph produces a learned adjacency matrix (edge weights).
+    Each graph produces a learned global adjacency matrix (edge weights) combined with 
+    sample-adaptive routing.
     """
     
     def __init__(self, embed_dim, num_aus, num_emotions, 
@@ -27,26 +74,15 @@ class AUGraphModule(nn.Module):
         # ============================================================
         # AU-AU Graph
         # ============================================================
-        # Learnable adjacency matrix for AU-AU (soft, continuous)
+        # Learnable global adjacency matrix for AU-AU
         self.au_au_adj = nn.Parameter(torch.randn(num_aus, num_aus) * 0.01)
         
-        # GAT layers for AU-AU message passing
-        self.au_au_gat_layers = nn.ModuleList()
+        self.au_au_layers = nn.ModuleList()
         in_dim = embed_dim
-        for layer_idx in range(gat_num_layers):
-            out_dim = gat_hidden_dim // gat_num_heads
-            self.au_au_gat_layers.append(
-                GATConv(
-                    in_channels=in_dim,         
-                    out_channels=out_dim,
-                    heads=gat_num_heads,
-                    dropout=dropout,
-                    concat=True,
-                )
-            )
-            in_dim = out_dim * gat_num_heads
-        
-        # Project back to embed_dim
+        for _ in range(gat_num_layers):
+            self.au_au_layers.append(DenseDynamicGraphConv(in_dim, gat_hidden_dim))
+            in_dim = gat_hidden_dim
+            
         self.au_au_proj = nn.Linear(in_dim, embed_dim)
         
         # ============================================================
@@ -54,50 +90,16 @@ class AUGraphModule(nn.Module):
         # ============================================================
         num_nodes_ae = num_aus + num_emotions
         
-        # Learnable adjacency matrix for AU-Exp
+        # Learnable global adjacency matrix for AU-Exp
         self.au_exp_adj = nn.Parameter(torch.randn(num_nodes_ae, num_nodes_ae) * 0.01)
         
-        # GAT layers for AU-Exp message passing
-        self.au_exp_gat_layers = nn.ModuleList()
+        self.au_exp_layers = nn.ModuleList()
         in_dim = embed_dim
-        for layer_idx in range(gat_num_layers):
-            out_dim = gat_hidden_dim // gat_num_heads
-            self.au_exp_gat_layers.append(
-                GATConv(
-                    in_channels=in_dim,
-                    out_channels=out_dim,
-                    heads=gat_num_heads,
-                    dropout=dropout,
-                    concat=True,
-                )
-            )
-            in_dim = out_dim * gat_num_heads
-        
+        for _ in range(gat_num_layers):
+            self.au_exp_layers.append(DenseDynamicGraphConv(in_dim, gat_hidden_dim))
+            in_dim = gat_hidden_dim
+            
         self.au_exp_proj = nn.Linear(in_dim, embed_dim)
-    
-    def _build_edge_index_from_adj(self, adj, threshold=0.0):
-        """
-        Convert a soft adjacency matrix to edge_index and edge_weight
-        for torch_geometric.
-        
-        Args:
-            adj: (N, N) learnable adjacency parameters
-            threshold: only include edges above this threshold (after sigmoid)
-        Returns:
-            edge_index: (2, E) edge indices
-            edge_weight: (E,) edge weights
-        """
-        # Apply sigmoid to get [0, 1] weights
-        weights = torch.sigmoid(adj)
-        
-        # Build fully connected edge_index (we let GAT attention handle sparsity)
-        N = adj.size(0)
-        src = torch.arange(N, device=adj.device).unsqueeze(1).expand(N, N).reshape(-1)
-        dst = torch.arange(N, device=adj.device).unsqueeze(0).expand(N, N).reshape(-1)
-        edge_index = torch.stack([src, dst], dim=0)  # (2, N*N)
-        edge_weight = weights.reshape(-1)            # (N*N,)
-        
-        return edge_index, edge_weight
     
     def forward_au_au(self, au_embeddings_stacked):
         """
@@ -106,28 +108,17 @@ class AUGraphModule(nn.Module):
         Args:
             au_embeddings_stacked: (B, N_AU, D) stacked AU embeddings
         Returns:
-            updated_au: (B, N_AU, D) updated AU embeddings after graph reasoning
-            au_au_adj_sigmoid: (N_AU, N_AU) learned adjacency weights
+            x: (B, N_AU, D) updated AU embeddings after graph reasoning
+            au_au_adj_sigmoid: (N_AU, N_AU) global learned adjacency weights
         """
-        B, N, D = au_embeddings_stacked.shape
-        device = au_embeddings_stacked.device
-        
-        edge_index, edge_weight = self._build_edge_index_from_adj(self.au_au_adj)
+        x = au_embeddings_stacked
+        for layer in self.au_au_layers:
+            x = layer(x, self.au_au_adj)
+            
+        x = self.au_au_proj(x)
         au_au_adj_sigmoid = torch.sigmoid(self.au_au_adj)
         
-        # Process each sample in the batch
-        outputs = []
-        for b in range(B):
-            x = au_embeddings_stacked[b]  # (N_AU, D)
-            for gat_layer in self.au_au_gat_layers:
-                x = gat_layer(x, edge_index)
-                x = F.elu(x)
-            x = self.au_au_proj(x)  # (N_AU, D)
-            outputs.append(x)
-        
-        updated_au = torch.stack(outputs, dim=0)  # (B, N_AU, D)
-        
-        return updated_au, au_au_adj_sigmoid
+        return x, au_au_adj_sigmoid
     
     def forward_au_exp(self, au_embeddings_stacked, emotion_embeddings_stacked):
         """
@@ -135,29 +126,17 @@ class AUGraphModule(nn.Module):
         
         Args:
             au_embeddings_stacked: (B, N_AU, D) AU embeddings
-            emotion_embeddings_stacked: (B, N_EMO, D) emotion embeddings (from 1D CNNs)
+            emotion_embeddings_stacked: (B, N_EMO, D) emotion embeddings
         Returns:
-            updated_nodes: (B, N_AU + N_EMO, D) updated node embeddings
-            au_exp_adj_sigmoid: (N_AU + N_EMO, N_AU + N_EMO) adjacency weights
+            x: (B, N_AU + N_EMO, D) updated node embeddings
+            au_exp_adj_sigmoid: (N_AU + N_EMO, N_AU + N_EMO) global adjacency weights
         """
-        B, N_AU, D = au_embeddings_stacked.shape
-        device = au_embeddings_stacked.device
-        
-        # Concatenate AU and Emotion node features directly
-        node_features = torch.cat([au_embeddings_stacked, emotion_embeddings_stacked], dim=1)  # (B, N_AU+N_EMO, D)
-        
-        edge_index, edge_weight = self._build_edge_index_from_adj(self.au_exp_adj)
+        node_features = torch.cat([au_embeddings_stacked, emotion_embeddings_stacked], dim=1)
+        x = node_features
+        for layer in self.au_exp_layers:
+            x = layer(x, self.au_exp_adj)
+            
+        x = self.au_exp_proj(x)
         au_exp_adj_sigmoid = torch.sigmoid(self.au_exp_adj)
         
-        outputs = []
-        for b in range(B):
-            x = node_features[b]  # (N_AU+N_EMO, D)
-            for gat_layer in self.au_exp_gat_layers:
-                x = gat_layer(x, edge_index)
-                x = F.elu(x)
-            x = self.au_exp_proj(x)
-            outputs.append(x)
-        
-        updated_nodes = torch.stack(outputs, dim=0)
-        
-        return updated_nodes, au_exp_adj_sigmoid
+        return x, au_exp_adj_sigmoid
