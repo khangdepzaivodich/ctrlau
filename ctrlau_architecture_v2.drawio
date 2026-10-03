@@ -1,0 +1,193 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile version="14.6.11">
+  <diagram id="ctrlau_diagram_v2" name="CtrlAU Architecture V2">
+    <mxGraphModel dx="1500" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="bg_p1" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#ced4da;dashed=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="20" y="150" width="240" height="500" as="geometry" />
+        </mxCell>
+        <mxCell id="txt_p1" value="Phase 1: Feature Extraction" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="20" y="110" width="240" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="bg_p2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#ced4da;dashed=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="280" y="150" width="480" height="500" as="geometry" />
+        </mxCell>
+        <mxCell id="txt_p2" value="Phase 2: Relational Graph &amp; Causal Interventions" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="280" y="110" width="480" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="bg_p3" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#ced4da;dashed=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="780" y="150" width="300" height="500" as="geometry" />
+        </mxCell>
+        <mxCell id="txt_p3" value="Phase 3: Abductive Inference &amp; Outputs" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="780" y="110" width="300" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="input_img" value="Face Image&#10;(224x224)" style="shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fixedSize=1;fillColor=#eceff1;strokeColor=#546e7a;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="70" y="180" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="resnet" value="ResNet-50&#10;(Backbone)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1e88e5;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="70" y="250" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="linear" value="Linear Projection&#10;(2048 -&gt; 512)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1e88e5;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="70" y="320" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="au_head" value="AU Head&#10;(8 Branches)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1e88e5;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="40" y="390" width="90" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="exp_head" value="Emotion Head&#10;(6 Branches)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1e88e5;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="150" y="390" width="90" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="au_emb" value="Base AU&#10;Embeddings" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#e0f7fa;strokeColor=#006064;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="40" y="470" width="90" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="exp_emb" value="Base Emotion&#10;Embeddings" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#e0f7fa;strokeColor=#006064;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="150" y="470" width="90" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="hsic_loss" value="HSIC Disentangle&#10;Loss" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#d32f2f;fontColor=#b71c1c;dashed=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="560" width="90" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="input_img" target="resnet">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="resnet" target="linear">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="linear" target="au_head">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="linear" target="exp_head">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="au_head" target="au_emb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="exp_head" target="exp_emb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_hsic" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#d32f2f;dashed=1;endArrow=block;endFill=1;" edge="1" parent="1" source="au_emb" target="hsic_loss">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="text_input" value="CLIP Text Prompts&#10;(AU &amp; Emotions)" style="shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fixedSize=1;fillColor=#eceff1;strokeColor=#546e7a;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="300" y="180" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="clip" value="Frozen CLIP Encoder" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#fb8c00;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="300" y="250" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="gram_schmidt" value="Gram-Schmidt&#10;Orthogonalization&#10;(Idea 1.1)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#fb8c00;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="300" y="320" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e_txt1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="text_input" target="clip">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_txt2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="clip" target="gram_schmidt">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="mask_mod" value="Mask Module&#10;(Importance &amp; Polarity)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#8e24aa;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="480" y="180" width="140" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="dag_loss" value="Global DAG Reg&#10;(Idea 2)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#d32f2f;fontColor=#b71c1c;dashed=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="640" y="180" width="100" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="e_mask_dag" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#d32f2f;dashed=1;endArrow=block;endFill=1;" edge="1" parent="1" source="mask_mod" target="dag_loss">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="sub_null_1" value="Semantic Subspace&#10;Nulling (L1: AU-AU)&#10;(Idea 1)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#e53935;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="300" y="420" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="gat_1" value="Dense Dynamic Graph&#10;Conv (AU-AU)&#10;(Idea 2)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#e53935;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="480" y="420" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="upd_au" value="Updated AU&#10;Nodes" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#e0f7fa;strokeColor=#006064;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="650" y="420" width="90" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="sub_null_2" value="Semantic Subspace&#10;Nulling (L2: AU-Exp)&#10;(Idea 1)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#e53935;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="300" y="520" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="gat_2" value="Dense Dynamic Graph&#10;Conv (AU-Exp)&#10;(Idea 2)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#e53935;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="480" y="520" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="upd_exp" value="Updated Emotion&#10;Nodes" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#e0f7fa;strokeColor=#006064;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="650" y="520" width="90" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e_au_null1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="au_emb" target="sub_null_1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_exp_null2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="exp_emb" target="sub_null_2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_gs_null1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="gram_schmidt" target="sub_null_1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_gs_null2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="gram_schmidt" target="sub_null_2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_null1_gat1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="sub_null_1" target="gat_1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_null2_gat2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="sub_null_2" target="gat_2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_mask_gat1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="mask_mod" target="gat_1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="550" y="220" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_mask_gat2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="mask_mod" target="gat_2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="550" y="220" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_gat1_upd" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="gat_1" target="upd_au">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_gat2_upd" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="gat_2" target="upd_exp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="class_au" value="AU Graph&#10;Classifiers" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1e88e5;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="800" y="420" width="100" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="class_exp" value="Emotion Graph&#10;Classifiers" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1e88e5;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="800" y="520" width="100" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="abd_inf" value="Test-Time Abductive&#10;Inference (Idea 3)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#43a047;fontColor=#000000;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="950" y="420" width="110" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="facs_loss" value="FACS Symbolic&#10;Rule Violations" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#d32f2f;fontColor=#b71c1c;dashed=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="950" y="310" width="110" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="cyc_loss" value="Bidirectional Cycle&#10;Consistency (Idea 4)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#d32f2f;fontColor=#b71c1c;dashed=1;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="950" y="230" width="110" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="final_out" value="Final Predictions" style="shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fixedSize=1;fillColor=#eceff1;strokeColor=#546e7a;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="950" y="600" width="110" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="e_upd1_c1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="upd_au" target="class_au">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_upd2_c2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="upd_exp" target="class_exp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c1_abd" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="class_au" target="abd_inf">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c2_abd" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="class_exp" target="abd_inf">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_abd_facs" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#d32f2f;dashed=1;endArrow=block;endFill=1;" edge="1" parent="1" source="abd_inf" target="facs_loss">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_abd_cyc" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#d32f2f;dashed=1;endArrow=block;endFill=1;" edge="1" parent="1" source="abd_inf" target="cyc_loss">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_abd_out" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;strokeColor=#333333;endArrow=block;endFill=1;" edge="1" parent="1" source="abd_inf" target="final_out">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

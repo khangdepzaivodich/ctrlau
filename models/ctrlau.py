@@ -557,16 +557,17 @@ class CtrlAUModel(nn.Module):
             
             # Idea 1.1: Semantic Basis Orthogonalization (Gram-Schmidt)
             # This ensures that nulling one AU doesn't accidentally erase correlated AUs
-            ortho_basis = torch.zeros_like(text_proj_au)
+            ortho_basis_list = []
             for i in range(NUM_AUS):
-                v_i = text_proj_au[i].clone()
-                for j in range(i):
-                    # Project v_i onto ortho_basis[j]
-                    proj_v_i = (v_i * ortho_basis[j]).sum() * ortho_basis[j]
+                v_i = text_proj_au[i]
+                for u_j in ortho_basis_list:
+                    # Project v_i onto u_j
+                    proj_v_i = (v_i * u_j).sum() * u_j
                     v_i = v_i - proj_v_i
-                ortho_basis[i] = F.normalize(v_i, dim=-1)
+                u_i = F.normalize(v_i, dim=-1)
+                ortho_basis_list.append(u_i)
                 
-            text_proj_norm = ortho_basis
+            text_proj_norm = torch.stack(ortho_basis_list, dim=0)
             text_proj_exp = text_proj_norm.view(1, 1, NUM_AUS, -1) # (1, 1, NUM_AUS, D_vis)
             
             # =========================================================

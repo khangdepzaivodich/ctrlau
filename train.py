@@ -158,8 +158,8 @@ def main():
         "--phase",
         type=int,
         default=1,
-        choices=[1, 2, 3],
-        help="Training phase: 1 (Feature Extraction), 2 (Graph Learning), 3 (End-to-End Fine-Tuning)"
+        choices=[1, 2, 3, 4],
+        help="Training phase: 1 (Base Classifiers), 2 (Causal Graph), 3 (Counterfactual Intervention), 4 (End-to-End)"
     )
     parser.add_argument(
         "--fold",
@@ -349,8 +349,8 @@ def main():
         model.cfg.lambda_cf_unimportant = 0.0
         
     elif args.phase == 2:
-        print("=== Phase 2: Graph Learning ===")
-        print("Freezing Backbone, LinearBlock, and CNN heads. Training only the Graph & Causal Modules.")
+        print("=== Phase 2: Causal Graph Routing ===")
+        print("Freezing Backbone and Base Classifiers. Training only the Graph Routing Modules.")
         if hasattr(model, "backbone"):
             for param in model.backbone.parameters():
                 param.requires_grad = False
@@ -379,7 +379,7 @@ def main():
             for param in model.emotion_text_proj.parameters():
                 param.requires_grad = False
             
-        # Freeze CNN classification losses, enable Graph & Causal losses
+        # Freeze base CNN classification losses, enable Graph losses ONLY
         model.cfg.lambda_au = 0.0
         model.cfg.lambda_emotion = 0.0
         model.cfg.lambda_ib = 0.0
@@ -389,11 +389,46 @@ def main():
         model.cfg.lambda_emo_contrastive = 0.0
         model.cfg.lambda_facs_au = 0.0
         
-        # Phase 2 Graph & Causal weights
+        # Enable Graph weights
         model.cfg.lambda_au_au = 1.0
         model.cfg.lambda_graph_au = 1.0
         model.cfg.lambda_graph_emo = 1.0
         model.cfg.lambda_dag = 0.1
+        
+        # NO Counterfactual losses in Phase 2
+        model.cfg.lambda_causal_au = 0.0
+        model.cfg.lambda_causal_exp = 0.0
+        model.cfg.lambda_facs_exp = 0.0
+        model.cfg.lambda_cf_important = 0.0
+        model.cfg.lambda_cf_unimportant = 0.0
+        model.cfg.lambda_cf_au_imp = 0.0
+        model.cfg.lambda_cf_au_unimp = 0.0
+        model.cfg.lambda_cf_exp_imp = 0.0
+        model.cfg.lambda_cf_exp_unimp = 0.0
+        
+    elif args.phase == 3:
+        print("=== Phase 3: Counterfactual Intervention ===")
+        print("Activating Counterfactual Pass and CF Losses on top of the Graph.")
+        # Same freezing logic as Phase 2
+        if hasattr(model, "backbone"):
+            for param in model.backbone.parameters():
+                param.requires_grad = False
+        if hasattr(model, "text_encoder"):
+            for param in model.text_encoder.parameters():
+                param.requires_grad = False
+                
+        # Zero out base task losses like in Phase 2
+        model.cfg.lambda_au = 0.0
+        model.cfg.lambda_emotion = 0.0
+        model.cfg.lambda_contrastive = 0.0
+        
+        # Graph weights active
+        model.cfg.lambda_au_au = 1.0
+        model.cfg.lambda_graph_au = 1.0
+        model.cfg.lambda_graph_emo = 1.0
+        model.cfg.lambda_dag = 0.1
+        
+        # Activate CF weights!
         model.cfg.lambda_causal_au = 0.1
         model.cfg.lambda_causal_exp = 0.1
         model.cfg.lambda_facs_exp = 0.1
@@ -403,9 +438,9 @@ def main():
         model.cfg.lambda_cf_au_unimp = 0.1
         model.cfg.lambda_cf_exp_imp = 0.1
         model.cfg.lambda_cf_exp_unimp = 0.1
-        
-    elif args.phase == 3:
-        print("=== Phase 3: End-to-End Fine-Tuning ===")
+
+    elif args.phase == 4:
+        print("=== Phase 4: End-to-End Refinement ===")
         print("Unfreezing everything. Setting low learning rate.")
         for param in model.parameters():
             param.requires_grad = True
