@@ -416,16 +416,17 @@ class CounterfactualLoss(nn.Module):
             loss_important, loss_unimportant
         """
         # 1. Logit-level Consistency & Discrepancy
+        num_targets = pred_original.size(1) if (pred_original.dim() >= 2 and pred_original.size(1) > 1) else 1.0
         if self.is_expression and pred_original.dim() == 2 and pred_original.size(1) > 1:
             # Multi-class emotion probabilities: KL divergence or MSE
             p_orig = pred_original.clamp(1e-6, 1.0)
             p_unimp = pred_unimportant_perturbed.clamp(1e-6, 1.0)
             logit_consist = F.kl_div(p_unimp.log(), p_orig, reduction='batchmean')
-            diff_important = F.mse_loss(pred_important_perturbed, pred_original)
+            diff_important = F.mse_loss(pred_important_perturbed, pred_original) * num_targets
             logit_discrep = torch.clamp(1.0 - diff_important, min=0.0)
         else:
             logit_consist = F.mse_loss(pred_unimportant_perturbed, pred_original)
-            diff_important = F.mse_loss(pred_important_perturbed, pred_original)
+            diff_important = F.mse_loss(pred_important_perturbed, pred_original) * num_targets
             logit_discrep = torch.clamp(1.0 - diff_important, min=0.0)
         
         # 2. Feature-level Consistency & Discrepancy (Cosine Distance)

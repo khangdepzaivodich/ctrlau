@@ -550,6 +550,7 @@ class CtrlAUModel(nn.Module):
             # 7. Hierarchical Counterfactual Intervention (4 Losses across Level 1 & Level 2)
             # Following Idea 1: Semantic Counterfactual Interventions via CLIP Subspace Nulling
             gamma_cf = getattr(self.cfg, "cf_gamma", 5.0)
+            alpha_cf = getattr(self.cfg, "cf_intervention_scale", 5.0)
             
             # Extract text embeddings and normalize for projection
             text_emb_au = self._get_text_embeddings(device=device) # (NUM_AUS, D_text)
@@ -583,8 +584,8 @@ class CtrlAUModel(nn.Module):
             m_discrep_exp_1 = m_discrep_au.unsqueeze(0).unsqueeze(-1) # (1, NUM_AUS, NUM_AUS, 1)
             m_consist_exp_1 = m_consist_au.unsqueeze(0).unsqueeze(-1)
             
-            # Idea 1: Project visual onto text and subtract (directional anatomical erasure)
-            proj_1 = (au_expanded_1 * text_proj_exp).sum(dim=-1, keepdim=True) * text_proj_exp
+            # Idea 1: Project visual onto text and subtract (directional anatomical erasure, scaled by alpha_cf)
+            proj_1 = alpha_cf * (au_expanded_1 * text_proj_exp).sum(dim=-1, keepdim=True) * text_proj_exp
             
             # Perturb source AUs for each target AU j by erasing semantic features
             au_imp_all_1 = (au_expanded_1 - proj_1 * m_discrep_exp_1).view(B * NUM_AUS, NUM_AUS, -1)
@@ -629,8 +630,8 @@ class CtrlAUModel(nn.Module):
             m_discrep_exp_2 = m_discrep_exp.unsqueeze(0).unsqueeze(-1) # (1, 7, 8, 1)
             m_consist_exp_2 = m_consist_exp.unsqueeze(0).unsqueeze(-1)
             
-            # Perturb source AUs for each target Emotion k by erasing semantic features
-            proj_2 = (au_expanded_2 * text_proj_exp).sum(dim=-1, keepdim=True) * text_proj_exp
+            # Perturb source AUs for each target Emotion k by erasing semantic features (scaled by alpha_cf)
+            proj_2 = alpha_cf * (au_expanded_2 * text_proj_exp).sum(dim=-1, keepdim=True) * text_proj_exp
             au_imp_all_2 = (au_expanded_2 - proj_2 * m_discrep_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
             au_unimp_all_2 = (au_expanded_2 - proj_2 * m_consist_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
             

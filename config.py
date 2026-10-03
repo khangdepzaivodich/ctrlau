@@ -129,6 +129,7 @@ class ModelConfig:
     # Counterfactual perturbation (CausalAffect Eq. 11-15)
     noise_std = 0.1                # Gaussian noise std for perturbation
     cf_gamma = 5.0                 # Sharpness factor for soft mask sigmoid
+    cf_intervention_scale = 5.0    # Scale factor alpha for counterfactual subspace erasure (Option A)
     
     
     # Loss weights: Feature Extraction & Regularizers (Phase 1, 2, 3)

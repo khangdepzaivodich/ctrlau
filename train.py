@@ -203,11 +203,18 @@ def main():
         default=0,
         help="Random seed for reproducibility (default: 0, matching ynhi's conf.py)",
     )
+    parser.add_argument(
+        "--cf-scale",
+        type=float,
+        default=5.0,
+        help="Intervention strength factor alpha for counterfactual subspace erasure (default: 5.0)",
+    )
     args = parser.parse_args()
 
     cfg = ModelConfig()
     cfg.batch_size = args.batch_size
     cfg.num_epochs = args.epochs
+    cfg.cf_intervention_scale = args.cf_scale
 
     # ---- Seeding (identical to ynhi's conf.py set_env) ----
     random.seed(args.seed)
