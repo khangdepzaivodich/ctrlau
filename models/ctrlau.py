@@ -234,9 +234,9 @@ class CtrlAUModel(nn.Module):
                 param.requires_grad = True
             for param in self.emotion_text_proj.parameters():
                 param.requires_grad = True
-        elif phase == 2:
-            # Phase 2: Graph Learning
-            # Freeze Backbone and CNN heads, train Graph reasoning
+        elif phase in (2, 3):
+            # Phase 2: Graph Learning & Phase 3: Counterfactual Interventions
+            # Freeze Backbone and CNN heads, train Graph reasoning & Causal Interventions
             for param in self.backbone.parameters():
                 param.requires_grad = False
             for param in self.global_linear.parameters():
@@ -265,8 +265,8 @@ class CtrlAUModel(nn.Module):
                 param.requires_grad = True
             for param in self.graph_emo_classifiers.parameters():
                 param.requires_grad = True
-        elif phase == 3:
-            # Phase 3: End-to-end fine tuning
+        elif phase == 4:
+            # Phase 4: End-to-end fine tuning
             for param in self.parameters():
                 param.requires_grad = True
             for param in self.text_encoder.parameters():
@@ -696,24 +696,28 @@ class CtrlAUModel(nn.Module):
         # ============================================================
         # Test-Time Symbolic Energy Minimization (Abductive Inference)
         # ============================================================
-        if not self.training:
+        # By default, use direct GAT predictions. Enable via cfg.enable_test_time_refinement = True
+        raw_graph_au_probs = graph_au_probs
+        raw_graph_emo_probs = graph_emo_probs
+        if not self.training and getattr(self.cfg, "enable_test_time_refinement", False):
             with torch.enable_grad():
                 refined_au_logits = graph_au_logits.detach().clone().requires_grad_(True)
                 refined_emo_logits = graph_emo_logits.detach().clone().requires_grad_(True)
                 
-                optimizer = torch.optim.Adam([refined_au_logits, refined_emo_logits], lr=0.05)
+                optimizer = torch.optim.Adam([refined_au_logits, refined_emo_logits], lr=0.01)
                 
-                for _ in range(15):
+                for _ in range(10):
                     optimizer.zero_grad()
                     p_au = torch.sigmoid(refined_au_logits)
                     p_emo = torch.sigmoid(refined_emo_logits)
                     
                     e_au = self.facs_au_violation_loss(p_au)
                     e_exp = self.facs_emotion_violation_loss(p_au, p_emo)
+                    # Strong prior anchor (1.0) so visual evidence is not overridden by rule suppression
                     e_prior = F.mse_loss(refined_au_logits, graph_au_logits.detach()) + \
                               F.mse_loss(refined_emo_logits, graph_emo_logits.detach())
                               
-                    energy = e_au + e_exp + 0.1 * e_prior
+                    energy = 0.05 * (e_au + e_exp) + 1.0 * e_prior
                     if energy.item() < 1e-5:
                         break
                         
@@ -734,6 +738,8 @@ class CtrlAUModel(nn.Module):
             "emotion_pseudo": emotion_pseudo,
             "graph_au_probs": graph_au_probs,
             "graph_emo_probs": graph_emo_probs,
+            "raw_graph_au_probs": raw_graph_au_probs,
+            "raw_graph_emo_probs": raw_graph_emo_probs,
             "au_au_adj": au_au_adj,
             "au_exp_adj": au_exp_adj,
             "au_au_importance_mask": au_au_imp_mask,

@@ -41,12 +41,13 @@ NUM_EMOTIONS = len(EMOTIONS)
 # operator: "AND" uses fuzzy t-norm (min), "OR" uses fuzzy co-norm (max)
 # The overall emotion score is computed by chaining these.
 #
-# Happiness:  AU6 AND AU12
-# Sadness:    AU1 AND AU4 AND AU15
-# Surprise:   AU1 AND AU2 AND AU5 AND AU26
-# Fear:       AU1 AND AU2 AND AU4 AND AU5 AND AU20 AND AU26
-# Anger:      AU4 AND AU5 AND AU17
-# Disgust:    AU9 AND AU15
+# Canonical EMFACS vs DISFA 8-AU Projection (see facs_au_emotions.md):
+# Happiness:  AU6 AND AU12                        -> DISFA: AU6 AND AU12
+# Sadness:    AU1 AND AU4 AND (AU15 OR AU17)      -> DISFA: AU1 AND AU4 (missing AU15, AU17)
+# Surprise:   AU1 AND AU2 AND AU5 AND (AU26|AU27) -> DISFA: AU1 AND AU2 AND AU26 (missing AU5)
+# Fear:       AU1 AND AU2 AND AU4 AND AU5 AND AU20 -> DISFA: AU1 AND AU2 AND AU4 AND AU26 (missing AU5, AU20)
+# Anger:      AU4 AND AU5 AND AU7 AND (AU23|AU24) -> DISFA: AU4 (missing AU5, AU7, AU17, AU23, AU24)
+# Disgust:    AU9 OR AU10                         -> DISFA: AU9 (missing AU10; AU9 is primary nasal marker)
 # ============================================================
 EMOTION_AU_RULES = {
     "happiness": {

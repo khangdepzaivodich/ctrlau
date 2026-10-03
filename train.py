@@ -8,9 +8,13 @@ Matches original MultiviewSymAU training pipeline:
 import os
 import random
 import argparse
+import warnings
 from math import cos, pi
 import numpy as np
 import torch
+
+# Suppress PyTorch JIT deprecation FutureWarning from third-party libraries
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.jit.*")
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from config import ModelConfig, DISFA_AUS
@@ -409,35 +413,50 @@ def main():
     elif args.phase == 3:
         print("=== Phase 3: Counterfactual Intervention ===")
         print("Activating Counterfactual Pass and CF Losses on top of the Graph.")
-        # Same freezing logic as Phase 2
-        if hasattr(model, "backbone"):
-            for param in model.backbone.parameters():
-                param.requires_grad = False
-        if hasattr(model, "text_encoder"):
-            for param in model.text_encoder.parameters():
-                param.requires_grad = False
+        # Exact same freezing logic as Phase 2: keep backbone, linear block, and heads frozen
+        modules_to_freeze = [
+            "backbone", "global_linear", "au_head", "emotion_head",
+            "text_encoder", "visual_proj", "text_proj",
+            "emotion_visual_proj", "emotion_text_proj"
+        ]
+        for mod_name in modules_to_freeze:
+            if hasattr(model, mod_name):
+                mod = getattr(model, mod_name)
+                if mod is not None:
+                    for param in mod.parameters():
+                        param.requires_grad = False
                 
         # Zero out base task losses like in Phase 2
         model.cfg.lambda_au = 0.0
         model.cfg.lambda_emotion = 0.0
+        model.cfg.lambda_ib = 0.0
+        model.cfg.lambda_align = 0.0
+        model.cfg.lambda_decorr = 0.0
         model.cfg.lambda_contrastive = 0.0
+        model.cfg.lambda_emo_contrastive = 0.0
+        model.cfg.lambda_facs_au = 0.0
         
-        # Graph weights active
+        # Graph weights active (dominant task supervision)
         model.cfg.lambda_au_au = 1.0
         model.cfg.lambda_graph_au = 1.0
         model.cfg.lambda_graph_emo = 1.0
         model.cfg.lambda_dag = 0.1
         
-        # Activate CF weights!
-        model.cfg.lambda_causal_au = 0.1
-        model.cfg.lambda_causal_exp = 0.1
-        model.cfg.lambda_facs_exp = 0.1
-        model.cfg.lambda_cf_important = 0.1
-        model.cfg.lambda_cf_unimportant = 0.1
-        model.cfg.lambda_cf_au_imp = 0.1
-        model.cfg.lambda_cf_au_unimp = 0.1
-        model.cfg.lambda_cf_exp_imp = 0.1
-        model.cfg.lambda_cf_exp_unimp = 0.1
+        # Balanced CF weights (0.05) so counterfactual regularization doesn't overpower task accuracy
+        model.cfg.lambda_causal_au = 0.05
+        model.cfg.lambda_causal_exp = 0.05
+        model.cfg.lambda_facs_exp = 0.05
+        model.cfg.lambda_cf_important = 0.05
+        model.cfg.lambda_cf_unimportant = 0.05
+        model.cfg.lambda_cf_au_imp = 0.05
+        model.cfg.lambda_cf_au_unimp = 0.05
+        model.cfg.lambda_cf_exp_imp = 0.05
+        model.cfg.lambda_cf_exp_unimp = 0.05
+
+        # Lower fine-tuning learning rate for Phase 3 (if not user-specified)
+        if args.lr == 1e-4:
+            args.lr = 2e-5
+            print(f"Phase 3 fine-tuning: setting learning rate to {args.lr:.2e}")
 
     elif args.phase == 4:
         print("=== Phase 4: End-to-End Refinement ===")
@@ -476,6 +495,14 @@ def main():
             print(f"  Unexpected keys: {len(unexpected)}")
         else:
             print(f"Warning: Checkpoint file '{args.resume}' not found. Starting from scratch.")
+    else:
+        if args.phase in [2, 3, 4]:
+            print(f"\n" + "=" * 60)
+            print(f"[NOTE] Phase {args.phase} is a fine-tuning stage that requires prior weights!")
+            print(f"       You did NOT pass '--resume <path.pth>'.")
+            print(f"       If starting from Phase 2 weights, remember to pass:")
+            print(f"       --resume <checkpoint_from_phase2.pth>")
+            print("=" * 60 + "\n")
 
     # Optimizer matching original SymGraphAU verbatim:
     # optim.AdamW(net.parameters(), betas=(0.9, 0.999), lr=conf.learning_rate, weight_decay=conf.weight_decay)

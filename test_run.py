@@ -4,6 +4,10 @@ Quick sanity check: dummy forward + backward pass to verify shapes and gradients
 import torch
 import sys
 import os
+import warnings
+
+# Suppress PyTorch JIT deprecation FutureWarning from third-party libraries
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.jit.*")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

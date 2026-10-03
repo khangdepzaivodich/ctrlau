@@ -77,3 +77,19 @@ $$\text{DISFA AUs} = \{\text{AU 1}, \text{AU 2}, \text{AU 4}, \text{AU 6}, \text
   * **Surprise / Fear Brow Raise**: AU 1 + AU 2
   * **Mouth Opening / Speech**: AU 25 + AU 26
   * **Disgust / Pain Expression**: AU 4 + AU 9
+
+---
+
+## 5. AU-to-Expression (AU-Exp) Prior Rules (EMFACS)
+
+For the complete, scientifically verified AU-to-Emotion mappings (including basic emotions under EMFACS and 9 compound emotions from Du, Tao, & Martinez, PNAS 2014), refer to [`facs_au_emotions.md`](facs_au_emotions.md).
+
+### Summary of Canonical AU-Exp Prototypical Rules:
+* **Happiness**: AU 6 + AU 12 (Duchenne smile; optional AU 25, 26).
+* **Sadness**: AU 1 + AU 4 + AU 15 (or AU 1 + AU 4 + AU 17; optional AU 11, 25, 26).
+* **Surprise**: AU 1 + AU 2 + AU 5 + (AU 26 OR AU 27) (optional AU 25).
+* **Fear**: AU 1 + AU 2 + AU 4 + AU 5 + AU 20 (optional AU 7, 25, 26, 27).
+* **Anger**: AU 4 + AU 5 + AU 7 + (AU 23 OR AU 24) (optional AU 17, 22, 25, 26, 10).
+* **Disgust**: AU 9 OR AU 10 (core diagnostic units; optional AU 15, 16, 17, 25, 26). Note: AU 15 and 16 are NOT simultaneously required.
+* **Contempt**: Unilateral AU 14 (Dimpler) or unilateral AU 12.
+

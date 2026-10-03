@@ -1,11 +1,10 @@
 """
-Graph Attention Network module for constructing AU-AU and AU-Expression graphs.
-Uses torch_geometric's GATConv layers.
+Graph Module for constructing AU-AU and AU-Expression graphs.
+Uses custom DenseDynamicGraphConv with sample-adaptive causal routing.
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GATConv
 
 
 class DenseDynamicGraphConv(nn.Module):
