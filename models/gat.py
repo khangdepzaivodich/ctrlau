@@ -84,6 +84,8 @@ class AUGraphModule(nn.Module):
             in_dim = gat_hidden_dim
             
         self.au_au_proj = nn.Linear(in_dim, embed_dim)
+        nn.init.normal_(self.au_au_proj.weight, std=0.01)
+        nn.init.zeros_(self.au_au_proj.bias)
         
         # ============================================================
         # AU-Expression Graph
@@ -100,6 +102,8 @@ class AUGraphModule(nn.Module):
             in_dim = gat_hidden_dim
             
         self.au_exp_proj = nn.Linear(in_dim, embed_dim)
+        nn.init.normal_(self.au_exp_proj.weight, std=0.01)
+        nn.init.zeros_(self.au_exp_proj.bias)
     
     def forward_au_au(self, au_embeddings_stacked):
         """

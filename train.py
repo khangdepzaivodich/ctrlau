@@ -526,6 +526,12 @@ def main():
             print(f"  Matched keys: {len(cleaned_state) - len(unexpected)}")
             print(f"  Missing keys (uninitialized in P1, e.g. Graph heads in Phase 2): {len(missing)}")
             print(f"  Unexpected keys: {len(unexpected)}")
+            
+            # If starting Phase 2 from Phase 1 weights, copy calibrated classifiers into graph heads
+            if args.phase >= 2 and any("graph_au_classifiers" in k for k in missing):
+                if hasattr(model, "init_graph_classifiers_from_base"):
+                    model.init_graph_classifiers_from_base()
+                    print("  [CtrlAU] Successfully initialized graph classifiers from trained Phase 1 AU/Emotion heads!")
         else:
             print(f"Warning: Checkpoint file '{args.resume}' not found. Starting from scratch.")
     else:

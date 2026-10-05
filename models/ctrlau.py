@@ -147,13 +147,25 @@ class CtrlAUModel(nn.Module):
         self.graph_emo_classifiers = nn.ModuleList([
             nn.Linear(EMB_DIM, 1) for _ in range(self.num_emotions)
         ])
-        # Residual scaling factor for Graph predictions over base CNN logits
-        self.graph_res_scale = nn.Parameter(torch.tensor(0.5))
+        # Initialize graph classifiers from trained base heads (Phase 1 calibrated boundaries)
+        self.init_graph_classifiers_from_base()
         
-        # Initialize graph classifiers with small weights so graph starts as identity refinement of Phase 1
-        for clf in list(self.au_au_classifiers) + list(self.graph_au_classifiers) + list(self.graph_emo_classifiers):
-            nn.init.normal_(clf.weight, std=0.01)
-            nn.init.zeros_(clf.bias)
+    def init_graph_classifiers_from_base(self):
+        """
+        Copy trained Phase 1 classifier weights from au_head and emotion_head 
+        into the graph classifiers so Phase 2 starts from calibrated decision boundaries.
+        """
+        if hasattr(self, "au_head") and hasattr(self.au_head, "classifiers"):
+            for i in range(min(len(self.au_head.classifiers), len(self.graph_au_classifiers))):
+                self.graph_au_classifiers[i].weight.data.copy_(self.au_head.classifiers[i].weight.data)
+                self.graph_au_classifiers[i].bias.data.copy_(self.au_head.classifiers[i].bias.data)
+            for i in range(min(len(self.au_head.classifiers), len(self.au_au_classifiers))):
+                self.au_au_classifiers[i].weight.data.copy_(self.au_head.classifiers[i].weight.data)
+                self.au_au_classifiers[i].bias.data.copy_(self.au_head.classifiers[i].bias.data)
+        if hasattr(self, "emotion_head") and hasattr(self.emotion_head, "classifiers"):
+            for i in range(min(len(self.emotion_head.classifiers), len(self.graph_emo_classifiers))):
+                self.graph_emo_classifiers[i].weight.data.copy_(self.emotion_head.classifiers[i].weight.data)
+                self.graph_emo_classifiers[i].bias.data.copy_(self.emotion_head.classifiers[i].bias.data)
         
         # ---- MultiviewSymAU Stage 1 Losses ----
         raw_au_pos_weights = torch.tensor([
@@ -231,7 +243,6 @@ class CtrlAUModel(nn.Module):
                 param.requires_grad = False
             for param in self.graph_emo_classifiers.parameters():
                 param.requires_grad = False
-            self.graph_res_scale.requires_grad = False
                 
             # Contrastive projection heads active during Phase 1
             for param in self.visual_proj.parameters():
@@ -273,7 +284,6 @@ class CtrlAUModel(nn.Module):
                 param.requires_grad = True
             for param in self.graph_emo_classifiers.parameters():
                 param.requires_grad = True
-            self.graph_res_scale.requires_grad = True
         elif phase == 4:
             # Phase 4: End-to-end fine tuning
             for param in self.parameters():
@@ -481,13 +491,9 @@ class CtrlAUModel(nn.Module):
         au_emb_stacked = torch.stack(au_embeddings, dim=1)           # (B, N_AU, D)
         emotion_emb_stacked = torch.stack(emotion_embed_list, dim=1) # (B, N_EMO, D)
         
-        # AU-AU graph
+        # AU-AU graph: models cross-AU dependencies via feature-level residual
         updated_au, au_au_adj = self.graph_module.forward_au_au(au_emb_stacked)
-        au_au_logits_raw = []
-        for i in range(NUM_AUS):
-            au_au_logits_raw.append(self.au_au_classifiers[i](updated_au[:, i, :]))
-        au_au_logits_raw = torch.cat(au_au_logits_raw, dim=1)
-        au_au_logits = au_logits.detach() + self.graph_res_scale * au_au_logits_raw
+        au_au_logits = torch.cat([self.au_au_classifiers[i](updated_au[:, i, :]) for i in range(NUM_AUS)], dim=1)
         au_au_probs = torch.sigmoid(au_au_logits)
         
         # AU-Expression graph: Hierarchical cascade (takes updated_au from AU-AU graph)
@@ -495,18 +501,10 @@ class CtrlAUModel(nn.Module):
         updated_au_final = updated_nodes[:, :NUM_AUS, :]
         updated_emo_final = updated_nodes[:, NUM_AUS:, :]
         
-        graph_au_logits_raw = []
-        for i in range(NUM_AUS):
-            graph_au_logits_raw.append(self.graph_au_classifiers[i](updated_au_final[:, i, :]))
-        graph_au_logits_raw = torch.cat(graph_au_logits_raw, dim=1)
-        graph_au_logits = au_logits.detach() + self.graph_res_scale * graph_au_logits_raw
+        graph_au_logits = torch.cat([self.graph_au_classifiers[i](updated_au_final[:, i, :]) for i in range(NUM_AUS)], dim=1)
         graph_au_probs = torch.sigmoid(graph_au_logits)
         
-        graph_emo_logits_raw = []
-        for i in range(self.num_emotions):
-            graph_emo_logits_raw.append(self.graph_emo_classifiers[i](updated_emo_final[:, i, :]))
-        graph_emo_logits_raw = torch.cat(graph_emo_logits_raw, dim=1)
-        graph_emo_logits = emotion_logits.detach() + self.graph_res_scale * graph_emo_logits_raw
+        graph_emo_logits = torch.cat([self.graph_emo_classifiers[i](updated_emo_final[:, i, :]) for i in range(self.num_emotions)], dim=1)
         graph_emo_probs = torch.sigmoid(graph_emo_logits)
         
         # Graph masks
@@ -615,8 +613,8 @@ class CtrlAUModel(nn.Module):
             updated_au_imp_1 = torch.stack([up_nodes_imp_1[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, 8, D)
             updated_au_unimp_1 = torch.stack([up_nodes_unimp_1[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, 8, D)
             
-            probs_imp_1 = torch.sigmoid(au_logits.detach() + self.graph_res_scale * torch.cat([self.au_au_classifiers[i](updated_au_imp_1[:, i, :]) for i in range(NUM_AUS)], dim=1))
-            probs_unimp_1 = torch.sigmoid(au_logits.detach() + self.graph_res_scale * torch.cat([self.au_au_classifiers[i](updated_au_unimp_1[:, i, :]) for i in range(NUM_AUS)], dim=1))
+            probs_imp_1 = torch.sigmoid(torch.cat([self.au_au_classifiers[i](updated_au_imp_1[:, i, :]) for i in range(NUM_AUS)], dim=1))
+            probs_unimp_1 = torch.sigmoid(torch.cat([self.au_au_classifiers[i](updated_au_unimp_1[:, i, :]) for i in range(NUM_AUS)], dim=1))
             
             # Level 1 CF Losses: Feature Cosine + Logit MSE
             loss_cf_au_imp, loss_cf_au_unimp = self.cf_loss_au(
@@ -660,8 +658,8 @@ class CtrlAUModel(nn.Module):
             updated_emo_imp_2 = torch.stack([up_nodes_imp_2[:, k, NUM_AUS + k, :] for k in range(self.num_emotions)], dim=1) # (B, 7, D)
             updated_emo_unimp_2 = torch.stack([up_nodes_unimp_2[:, k, NUM_AUS + k, :] for k in range(self.num_emotions)], dim=1) # (B, 7, D)
             
-            probs_imp_2 = torch.sigmoid(emotion_logits.detach() + self.graph_res_scale * torch.cat([self.graph_emo_classifiers[k](updated_emo_imp_2[:, k, :]) for k in range(self.num_emotions)], dim=1))
-            probs_unimp_2 = torch.sigmoid(emotion_logits.detach() + self.graph_res_scale * torch.cat([self.graph_emo_classifiers[k](updated_emo_unimp_2[:, k, :]) for k in range(self.num_emotions)], dim=1))
+            probs_imp_2 = torch.sigmoid(torch.cat([self.graph_emo_classifiers[k](updated_emo_imp_2[:, k, :]) for k in range(self.num_emotions)], dim=1))
+            probs_unimp_2 = torch.sigmoid(torch.cat([self.graph_emo_classifiers[k](updated_emo_unimp_2[:, k, :]) for k in range(self.num_emotions)], dim=1))
             
             # Level 2 CF Losses: Feature Cosine + Logit MSE/KL
             loss_cf_exp_imp, loss_cf_exp_unimp = self.cf_loss_exp(
