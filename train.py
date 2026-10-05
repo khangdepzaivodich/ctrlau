@@ -68,26 +68,49 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
         if (batch_idx + 1) % 50 == 0:
             avg_total = running_losses["total_loss"] / num_batches
             msg = f"  Epoch {epoch}, Batch {batch_idx + 1}/{len(dataloader)}, Total Loss: {avg_total:.4f}"
-            if "loss_wa" in running_losses:
-                msg += f", L_wa: {running_losses['loss_wa'] / num_batches:.4f}"
-            if "loss_we" in running_losses:
-                msg += f", L_we: {running_losses['loss_we'] / num_batches:.4f}"
-            if "loss_ib" in running_losses:
-                msg += f", L_ib: {running_losses['loss_ib'] / num_batches:.4f}"
-            if "loss_align" in running_losses:
-                msg += f", L_align: {running_losses['loss_align'] / num_batches:.4f}"
-            if "loss_decorr" in running_losses and running_losses['loss_decorr'] > 0:
-                msg += f", L_decorr: {running_losses['loss_decorr'] / num_batches:.4f}"
-            if "loss_contrastive" in running_losses and running_losses['loss_contrastive'] > 0:
-                msg += f", L_clip_au: {running_losses['loss_contrastive'] / num_batches:.4f}"
-            if "loss_emo_contrastive" in running_losses and running_losses['loss_emo_contrastive'] > 0:
-                msg += f", L_clip_exp: {running_losses['loss_emo_contrastive'] / num_batches:.4f}"
-            if "loss_facs_au" in running_losses and running_losses['loss_facs_au'] > 0:
-                msg += f", L_facs: {running_losses['loss_facs_au'] / num_batches:.4f}"
-            if "loss_cf_au_imp" in running_losses and running_losses['loss_cf_au_imp'] > 0:
-                msg += f", CF_au: {running_losses['loss_cf_au_imp'] / num_batches:.4f}"
-            if "loss_cf_exp_imp" in running_losses and running_losses['loss_cf_exp_imp'] > 0:
-                msg += f", CF_exp: {running_losses['loss_cf_exp_imp'] / num_batches:.4f}"
+            
+            # Phase 1 CNN Losses (if in Phase 1)
+            if running_losses.get("loss_graph_au", 0.0) == 0.0:
+                if "loss_wa" in running_losses:
+                    msg += f", L_wa: {running_losses['loss_wa'] / num_batches:.4f}"
+                if "loss_we" in running_losses:
+                    msg += f", L_we: {running_losses['loss_we'] / num_batches:.4f}"
+                if "loss_ib" in running_losses and abs(running_losses['loss_ib']) > 1e-6:
+                    msg += f", L_ib: {running_losses['loss_ib'] / num_batches:.4f}"
+                if "loss_align" in running_losses and abs(running_losses['loss_align']) > 1e-6:
+                    msg += f", L_align: {running_losses['loss_align'] / num_batches:.4f}"
+                if "loss_decorr" in running_losses and abs(running_losses['loss_decorr']) > 1e-6:
+                    msg += f", L_decorr: {running_losses['loss_decorr'] / num_batches:.4f}"
+                if "loss_contrastive" in running_losses and running_losses['loss_contrastive'] > 0:
+                    msg += f", L_clip_au: {running_losses['loss_contrastive'] / num_batches:.4f}"
+                if "loss_emo_contrastive" in running_losses and running_losses['loss_emo_contrastive'] > 0:
+                    msg += f", L_clip_exp: {running_losses['loss_emo_contrastive'] / num_batches:.4f}"
+                if "loss_facs_au" in running_losses and running_losses['loss_facs_au'] > 0:
+                    msg += f", L_facs: {running_losses['loss_facs_au'] / num_batches:.4f}"
+            else:
+                # Phase 2 & 3: Graph, Relational, Cycle & Counterfactual Losses
+                if "loss_graph_au" in running_losses:
+                    msg += f", L_g_au: {running_losses['loss_graph_au'] / num_batches:.4f}"
+                if "loss_graph_emo" in running_losses:
+                    msg += f", L_g_emo: {running_losses['loss_graph_emo'] / num_batches:.4f}"
+                if "loss_au_au" in running_losses:
+                    msg += f", L_au_au: {running_losses['loss_au_au'] / num_batches:.4f}"
+                if "loss_cycle" in running_losses and running_losses['loss_cycle'] > 0:
+                    msg += f", L_cycle: {running_losses['loss_cycle'] / num_batches:.4f}"
+                if "loss_dag" in running_losses and running_losses['loss_dag'] > 0:
+                    msg += f", L_dag: {running_losses['loss_dag'] / num_batches:.4f}"
+                if ("loss_causal_au" in running_losses and running_losses['loss_causal_au'] > 0) or ("loss_causal_exp" in running_losses and running_losses['loss_causal_exp'] > 0):
+                    l_c = (running_losses.get('loss_causal_au', 0.0) + running_losses.get('loss_causal_exp', 0.0)) / num_batches
+                    msg += f", L_causal: {l_c:.4f}"
+                if "loss_facs_exp" in running_losses and running_losses['loss_facs_exp'] > 0:
+                    msg += f", L_facs_exp: {running_losses['loss_facs_exp'] / num_batches:.4f}"
+                if "loss_cf_au_imp" in running_losses and running_losses['loss_cf_au_imp'] > 0:
+                    msg += f", CF_au: {running_losses['loss_cf_au_imp'] / num_batches:.4f}"
+                if "loss_cf_exp_imp" in running_losses and running_losses['loss_cf_exp_imp'] > 0:
+                    msg += f", CF_exp: {running_losses['loss_cf_exp_imp'] / num_batches:.4f}"
+                if "loss_cf_au_unimp" in running_losses and running_losses['loss_cf_au_unimp'] > 0:
+                    cf_unimp = (running_losses['loss_cf_au_unimp'] + running_losses.get('loss_cf_exp_unimp', 0.0)) / (2 * num_batches)
+                    msg += f", CF_unimp: {cf_unimp:.4f}"
             print(msg)
     
     # Print epoch summary
@@ -356,6 +379,7 @@ def main():
         model.cfg.lambda_au_au = 0.0
         model.cfg.lambda_graph_au = 0.0
         model.cfg.lambda_graph_emo = 0.0
+        model.cfg.lambda_cycle = 0.0
         model.cfg.lambda_cf_important = 0.0
         model.cfg.lambda_cf_unimportant = 0.0
         
@@ -400,11 +424,12 @@ def main():
         model.cfg.lambda_emo_contrastive = 0.0
         model.cfg.lambda_facs_au = 0.0
         
-        # Enable Graph weights
+        # Enable Graph & Cycle weights
         model.cfg.lambda_au_au = 1.0
         model.cfg.lambda_graph_au = 1.0
         model.cfg.lambda_graph_emo = 1.0
         model.cfg.lambda_dag = 0.1
+        model.cfg.lambda_cycle = 0.02
         
         # NO Counterfactual losses in Phase 2
         model.cfg.lambda_causal_au = 0.0
@@ -443,11 +468,12 @@ def main():
         model.cfg.lambda_emo_contrastive = 0.0
         model.cfg.lambda_facs_au = 0.0
         
-        # Graph weights active (dominant task supervision)
+        # Graph & Cycle weights active (dominant task supervision)
         model.cfg.lambda_au_au = 1.0
         model.cfg.lambda_graph_au = 1.0
         model.cfg.lambda_graph_emo = 1.0
         model.cfg.lambda_dag = 0.1
+        model.cfg.lambda_cycle = 0.02
         
         # Balanced CF weights (0.05) so counterfactual regularization doesn't overpower task accuracy
         model.cfg.lambda_causal_au = 0.05

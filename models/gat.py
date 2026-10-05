@@ -19,6 +19,7 @@ class DenseDynamicGraphConv(nn.Module):
         self.W_k = nn.Linear(in_dim, out_dim)
         self.W_v = nn.Linear(in_dim, out_dim)
         self.out_proj = nn.Linear(out_dim, out_dim)
+        self.residual_proj = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
         
     def forward(self, x, global_adj_logits):
         """
@@ -47,9 +48,9 @@ class DenseDynamicGraphConv(nn.Module):
         # Row-normalize (like standard attention/GCN)
         combined_adj = combined_adj / (combined_adj.sum(dim=-1, keepdim=True) + 1e-8)
         
-        # 4. Message Passing
+        # 4. Message Passing with Residual Connection
         out = torch.matmul(combined_adj, V)  # (B, N, D')
-        out = F.elu(self.out_proj(out))
+        out = self.residual_proj(x) + F.elu(self.out_proj(out))
         return out
 
 
@@ -114,7 +115,7 @@ class AUGraphModule(nn.Module):
         for layer in self.au_au_layers:
             x = layer(x, self.au_au_adj)
             
-        x = self.au_au_proj(x)
+        x = au_embeddings_stacked + self.au_au_proj(x)
         au_au_adj_sigmoid = torch.sigmoid(self.au_au_adj)
         
         return x, au_au_adj_sigmoid
@@ -135,7 +136,7 @@ class AUGraphModule(nn.Module):
         for layer in self.au_exp_layers:
             x = layer(x, self.au_exp_adj)
             
-        x = self.au_exp_proj(x)
+        x = node_features + self.au_exp_proj(x)
         au_exp_adj_sigmoid = torch.sigmoid(self.au_exp_adj)
         
         return x, au_exp_adj_sigmoid
