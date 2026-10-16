@@ -163,23 +163,6 @@ class CtrlAUModel(nn.Module):
         # Initialize graph classifiers from trained base heads (Phase 1 calibrated boundaries)
         self.init_graph_classifiers_from_base()
         
-    def init_graph_classifiers_from_base(self):
-        """
-        Copy trained Phase 1 classifier weights from au_head and emotion_head 
-        into the graph classifiers so Phase 2 starts from calibrated decision boundaries.
-        """
-        if hasattr(self, "au_head") and hasattr(self.au_head, "classifiers"):
-            for i in range(min(len(self.au_head.classifiers), len(self.graph_au_classifiers))):
-                self.graph_au_classifiers[i].weight.data.copy_(self.au_head.classifiers[i].weight.data)
-                self.graph_au_classifiers[i].bias.data.copy_(self.au_head.classifiers[i].bias.data)
-            for i in range(min(len(self.au_head.classifiers), len(self.au_au_classifiers))):
-                self.au_au_classifiers[i].weight.data.copy_(self.au_head.classifiers[i].weight.data)
-                self.au_au_classifiers[i].bias.data.copy_(self.au_head.classifiers[i].bias.data)
-        if hasattr(self, "emotion_head") and hasattr(self.emotion_head, "classifiers"):
-            for i in range(min(len(self.emotion_head.classifiers), len(self.graph_emo_classifiers))):
-                self.graph_emo_classifiers[i].weight.data.copy_(self.emotion_head.classifiers[i].weight.data)
-                self.graph_emo_classifiers[i].bias.data.copy_(self.emotion_head.classifiers[i].bias.data)
-        
         # ---- MultiviewSymAU Stage 1 Losses ----
         # Fold-specific class weights are supplied by the dataset in train.py.
         # Until then, unit weights are the mathematically neutral WAL setting.
@@ -219,6 +202,20 @@ class CtrlAUModel(nn.Module):
         
         # Initialize default phase freeze/unfreeze
         self.set_phase(self.phase)
+
+    def init_graph_classifiers_from_base(self):
+        """Copy base classifiers without reinitializing training state."""
+        if hasattr(self, "au_head") and hasattr(self.au_head, "classifiers"):
+            for i in range(min(len(self.au_head.classifiers), len(self.graph_au_classifiers))):
+                self.graph_au_classifiers[i].weight.data.copy_(self.au_head.classifiers[i].weight.data)
+                self.graph_au_classifiers[i].bias.data.copy_(self.au_head.classifiers[i].bias.data)
+            for i in range(min(len(self.au_head.classifiers), len(self.au_au_classifiers))):
+                self.au_au_classifiers[i].weight.data.copy_(self.au_head.classifiers[i].weight.data)
+                self.au_au_classifiers[i].bias.data.copy_(self.au_head.classifiers[i].bias.data)
+        if hasattr(self, "emotion_head") and hasattr(self.emotion_head, "classifiers"):
+            for i in range(min(len(self.emotion_head.classifiers), len(self.graph_emo_classifiers))):
+                self.graph_emo_classifiers[i].weight.data.copy_(self.emotion_head.classifiers[i].weight.data)
+                self.graph_emo_classifiers[i].bias.data.copy_(self.emotion_head.classifiers[i].bias.data)
     
     def set_phase(self, phase: int):
         """Configure trainable modules and loss weights for Phase 1, 2, or 3."""
