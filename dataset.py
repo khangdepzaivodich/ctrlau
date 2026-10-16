@@ -1,5 +1,5 @@
 """
-DISFA Dataset loader.
+Dataset loaders for the two CtrlAU benchmark protocols.
 Supports BOTH:
 1. List-based dataset (official MultiviewSymAU format with data/list/DISFA_train_...txt)
 2. Raw directory dataset (DISFA_Data with img/ and ActionUnit_Labels/ folders)
@@ -13,7 +13,46 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 from torchvision import transforms
-from config import DISFA_AUS, AU_INDEX, ModelConfig
+from config import DISFA_AUS, BP4D_AUS, AU_INDEX, ModelConfig
+
+
+def _default_transform(train):
+    """The image preprocessing used by the reference MultiviewSymAU code."""
+    if train:
+        return transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+    return transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]),
+    ])
+
+
+def _read_list_file(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return [line.strip().replace("\\", "/") for line in handle if line.strip()]
+
+
+def _read_label_matrix(path, expected_rows, expected_cols, dataset_name):
+    labels = np.loadtxt(path, dtype=np.float32)
+    if labels.ndim == 1:
+        labels = labels.reshape(1, -1)
+    if labels.shape != (expected_rows, expected_cols):
+        raise ValueError(
+            f"{dataset_name} label file {path} has shape {labels.shape}; "
+            f"expected ({expected_rows}, {expected_cols})"
+        )
+    if not np.isfinite(labels).all() or not np.isin(labels, [0.0, 1.0]).all():
+        raise ValueError(f"{dataset_name} labels must be finite binary values: {path}")
+    return torch.from_numpy(labels)
 
 
 def _resolve_data_root(data_root):
@@ -83,27 +122,7 @@ class DISFADataset(Dataset):
         # List root
         self.list_root = _find_dir_ci(self.data_root, "list")
         
-        # Transforms matching MultiviewSymAU/utils.py
-        if transform is None:
-            if train:
-                self.transform = transforms.Compose([
-                    transforms.Resize(256),
-                    transforms.CenterCrop(224),
-                    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225]),
-                ])
-            else:
-                self.transform = transforms.Compose([
-                    transforms.Resize(256),
-                    transforms.CenterCrop(224),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225]),
-                ])
-        else:
-            self.transform = transform
+        self.transform = transform if transform is not None else _default_transform(train)
 
         self.samples = []
         self.labels = []
@@ -135,19 +154,19 @@ class DISFADataset(Dataset):
                 print(f"  Img list:   {img_file}")
                 print(f"  Label list: {label_file}")
 
-                raw_imgs = [line.strip().replace("\\", "/") for line in open(img_file, "r").readlines() if line.strip()]
-                raw_labels = np.loadtxt(label_file)
-
-                # Ensure labels 2D
-                if raw_labels.ndim == 1:
-                    raw_labels = raw_labels.reshape(1, -1)
+                raw_imgs = _read_list_file(img_file)
+                raw_labels = _read_label_matrix(
+                    label_file, len(raw_imgs), len(DISFA_AUS), "DISFA"
+                )
 
                 for idx, rel_path in enumerate(raw_imgs):
                     full_img_path = os.path.join(self.img_root, rel_path)
+                    if not os.path.isfile(full_img_path):
+                        raise FileNotFoundError(f"DISFA image listed but not found: {full_img_path}")
                     self.samples.append((rel_path, full_img_path))
                     self.labels.append(raw_labels[idx])
 
-                self.labels = torch.tensor(np.array(self.labels), dtype=torch.float32)
+                self.labels = torch.stack(self.labels)
 
         # ------------------------------------------------------------
         # Priority 2: Raw folder layout (ActionUnit_Labels/SNxxx/...)
@@ -164,7 +183,7 @@ class DISFADataset(Dataset):
             for subj in subjects:
                 subj_label_dir = os.path.join(self.label_root, subj)
                 if not os.path.isdir(subj_label_dir):
-                    continue
+                    raise FileNotFoundError(f"DISFA subject label directory not found: {subj_label_dir}")
 
                 au_labels = {}
                 frame_nums = None
@@ -178,7 +197,9 @@ class DISFADataset(Dataset):
                     ]
                     label_file = next((f for f in candidates if os.path.isfile(f)), None)
                     if not label_file:
-                        continue
+                        raise FileNotFoundError(
+                            f"DISFA subject {subj} is missing the label file for AU{au}"
+                        )
 
                     au_labels[au] = {}
                     with open(label_file, "r") as f:
@@ -187,8 +208,15 @@ class DISFADataset(Dataset):
                             if not line:
                                 continue
                             parts = line.replace("\t", ",").split(",")
+                            if len(parts) < 2:
+                                raise ValueError(f"Malformed DISFA label line in {label_file}: {line!r}")
                             frame_num = int(parts[0])
                             intensity = int(parts[1])
+                            if frame_num <= 0 or intensity < 0 or intensity > 5:
+                                raise ValueError(
+                                    f"DISFA labels must have frame>0 and intensity in [0,5]; "
+                                    f"got {frame_num}, {intensity} in {label_file}"
+                                )
                             au_labels[au][frame_num] = intensity
 
                     if frame_nums is None:
@@ -205,8 +233,9 @@ class DISFADataset(Dataset):
 
                 for fn in sorted(frame_nums):
                     img_path = os.path.join(self.img_root, subj, f"{fn}.png")
-                    if os.path.exists(img_path):
-                        self.samples.append((subj, fn, img_path))
+                    if not os.path.isfile(img_path):
+                        raise FileNotFoundError(f"DISFA frame listed but not found: {img_path}")
+                    self.samples.append((subj, fn, img_path))
 
         # Diagnostic if 0 samples
         if len(self.samples) == 0:
@@ -244,7 +273,7 @@ class DISFADataset(Dataset):
 
             for au in DISFA_AUS:
                 i = AU_INDEX[au]
-                intensity = self.labels_cache.get((subj, au), {}).get(frame_num, 0)
+                intensity = self.labels_cache[(subj, au)][frame_num]
                 au_intensities[i] = intensity / 5.0
                 au_labels[i] = 1.0 if intensity >= self.intensity_threshold else 0.0
 
@@ -267,8 +296,10 @@ class DISFADataset(Dataset):
         if self.mode == "list":
             counts = self.labels.sum(dim=0)
             occur_rates = counts / float(num_samples)
-            occur_rates_clamped = torch.clamp(occur_rates, min=1e-5)
-            raw_weights = 1.0 / occur_rates_clamped
+            if torch.any(occur_rates <= 0):
+                missing = [DISFA_AUS[i] for i, rate in enumerate(occur_rates) if rate <= 0]
+                raise ValueError(f"DISFA training split has no positive samples for AU(s): {missing}")
+            raw_weights = 1.0 / occur_rates
             normalized_weights = raw_weights / raw_weights.sum() * len(DISFA_AUS)
             return normalized_weights, occur_rates
         else:
@@ -276,11 +307,89 @@ class DISFADataset(Dataset):
             for subj, fn, _ in self.samples:
                 for au in DISFA_AUS:
                     i = AU_INDEX[au]
-                    if self.labels_cache.get((subj, au), {}).get(fn, 0) >= self.intensity_threshold:
+                    if self.labels_cache[(subj, au)][fn] >= self.intensity_threshold:
                         counts[i] += 1.0
 
             occur_rates = counts / float(num_samples)
-            occur_rates_clamped = torch.clamp(occur_rates, min=1e-5)
-            raw_weights = 1.0 / occur_rates_clamped
+            if torch.any(occur_rates <= 0):
+                missing = [DISFA_AUS[i] for i, rate in enumerate(occur_rates) if rate <= 0]
+                raise ValueError(f"DISFA training split has no positive samples for AU(s): {missing}")
+            raw_weights = 1.0 / occur_rates
             normalized_weights = raw_weights / raw_weights.sum() * len(DISFA_AUS)
             return normalized_weights, occur_rates
+
+
+class BP4DDataset(Dataset):
+    """BP4D loader for the official three-fold prepared list protocol.
+
+    The prepared BP4D lists contain one binary occurrence label per AU.  BP4D
+    does not provide DISFA-style intensity files in this protocol, so the
+    returned ``au_intensities`` field is explicitly the same binary occurrence
+    tensor; no intensity value is invented or inferred.
+    """
+
+    def __init__(self, data_root, transform=None, train=True, fold=1):
+        if fold not in (1, 2, 3):
+            raise ValueError(f"BP4D fold must be 1, 2, or 3; got {fold}")
+
+        self.data_root = _resolve_data_root(data_root)
+        self.train = train
+        self.fold = fold
+        self.au_ids = tuple(BP4D_AUS)
+        self.img_root = _find_dir_ci(self.data_root, "img")
+        if not os.path.isdir(self.img_root):
+            raise FileNotFoundError(f"BP4D image directory not found: {self.img_root}")
+        self.list_root = _find_dir_ci(self.data_root, "list")
+        if not os.path.isdir(self.list_root):
+            raise FileNotFoundError(f"BP4D list directory not found: {self.list_root}")
+        self.transform = transform if transform is not None else _default_transform(train)
+
+        prefix = "train" if train else "test"
+        img_file = os.path.join(
+            self.list_root, f"BP4D_{prefix}_img_path_fold{fold}.txt"
+        )
+        label_file = os.path.join(
+            self.list_root, f"BP4D_{prefix}_label_fold{fold}.txt"
+        )
+        if not os.path.isfile(img_file) or not os.path.isfile(label_file):
+            raise FileNotFoundError(
+                "BP4D requires the official prepared list files for the selected split: "
+                f"{img_file} and {label_file}"
+            )
+
+        rel_paths = _read_list_file(img_file)
+        labels = _read_label_matrix(label_file, len(rel_paths), len(self.au_ids), "BP4D")
+        self.samples = []
+        for rel_path in rel_paths:
+            full_path = os.path.join(self.img_root, rel_path)
+            if not os.path.isfile(full_path):
+                raise FileNotFoundError(f"BP4D image listed but not found: {full_path}")
+            self.samples.append((rel_path, full_path))
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        rel_path, image_path = self.samples[idx]
+        image = Image.open(image_path).convert("RGB")
+        if self.transform is not None:
+            image = self.transform(image)
+        au_labels = self.labels[idx]
+        return {
+            "image": image,
+            "au_labels": au_labels,
+            "au_intensities": au_labels,
+            "sample_id": rel_path,
+        }
+
+    def calculate_class_weights(self):
+        if len(self) == 0:
+            raise ValueError("BP4D split contains no samples; class weights are undefined")
+        occurrence_rates = self.labels.mean(dim=0)
+        if torch.any(occurrence_rates <= 0):
+            missing = [self.au_ids[i] for i, rate in enumerate(occurrence_rates) if rate <= 0]
+            raise ValueError(f"BP4D training split has no positive samples for AU(s): {missing}")
+        inverse_rates = 1.0 / occurrence_rates
+        normalized_weights = inverse_rates / inverse_rates.sum() * len(self.au_ids)
+        return normalized_weights, occurrence_rates

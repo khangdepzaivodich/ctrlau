@@ -311,61 +311,37 @@ class ViolationLoss(nn.Module):
         return loss
 
 
-class FACSEmotionViolationLoss(nn.Module):
-    """
-    Computes strict FACS-based hypergraph violations for AU-Expression logic.
-    Evaluates strict logic gates using Fuzzy Logic (T-norm).
-    Formula: Prob(A) * Prob(B) * ... * (1 - Prob(Emotion))
-    """
-    # Mapping from rule emotion names to SYM_EMOTIONS indices:
-    # SYM_EMOTIONS = ["Angry", "Fear", "Happy", "Sad", "Surprise", "Disgust", "Neutral"]
-    EMO_TO_SYM_IDX = {
-        "anger": 0,
-        "fear": 1,
-        "happiness": 2,
-        "sadness": 3,
-        "surprise": 4,
-        "disgust": 5,
-    }
+class AUExpressionSupportLoss(nn.Module):
+    """Penalize supported AUs that fail to support the matching expression.
 
-    def __init__(self):
+    ``support_matrix`` is the verified SymGraphAU relation mask with shape
+    ``(N_expression, N_AU)``.  This is a soft implication regularizer for the
+    CtrlAU graph; it is deliberately separate from Phase 1 and is not a claim
+    that a FACS rule can uniquely identify an expression.
+    """
+    def __init__(self, support_matrix):
         super().__init__()
-        from config import EMOTION_AU_RULES_IDX
-        self.rules = EMOTION_AU_RULES_IDX
+        support_matrix = torch.as_tensor(support_matrix, dtype=torch.float32)
+        if support_matrix.dim() != 2:
+            raise ValueError("support_matrix must have shape (N_expression, N_AU)")
+        if support_matrix.sum() <= 0:
+            raise ValueError("support_matrix must contain at least one verified AU-expression relation")
+        self.register_buffer("support_matrix", support_matrix)
 
     def forward(self, au_probs, emotion_probs):
-        """
-        Args:
-            au_probs: (B, N_AU) AU probabilities
-            emotion_probs: (B, N_EMO) Emotion probabilities (ordered by SYM_EMOTIONS)
-        Returns:
-            violation loss scalar
-        """
-        device = au_probs.device
-        total_violation = torch.tensor(0.0, device=device)
-        
-        for emo_name, rule in self.rules.items():
-            sym_idx = self.EMO_TO_SYM_IDX.get(emo_name, None)
-            if sym_idx is None or sym_idx >= emotion_probs.size(1):
-                continue
-
-            au_indices = rule["required_idx"]
-            
-            # Gather relevant AU probabilities
-            relevant_probs = au_probs[:, au_indices]  # (B, K)
-            
-            # T-norm (AND) over required AUs
-            if rule["operator"] == "AND":
-                au_score = relevant_probs.prod(dim=1)  # (B,)
-            else: # OR
-                au_score = 1.0 - (1.0 - relevant_probs).prod(dim=1)
-                
-            # Violation: AUs are firing but Emotion is NOT firing
-            # Violation = au_score * (1 - emotion_prob)
-            violation = au_score * (1.0 - emotion_probs[:, sym_idx])
-            total_violation += violation.mean()
-            
-        return total_violation
+        if au_probs.dim() != 2 or emotion_probs.dim() != 2:
+            raise ValueError("AU and expression probabilities must be rank-2 tensors")
+        if au_probs.size(1) != self.support_matrix.size(1):
+            raise ValueError("AU probability dimension does not match support_matrix")
+        if emotion_probs.size(1) != self.support_matrix.size(0):
+            raise ValueError("expression probability dimension does not match support_matrix")
+        violations = (
+            au_probs.unsqueeze(1)
+            * (1.0 - emotion_probs.unsqueeze(-1))
+        )
+        return (violations * self.support_matrix.unsqueeze(0)).sum() / (
+            au_probs.size(0) * self.support_matrix.sum()
+        )
 
 
 # ============================================================
@@ -417,17 +393,12 @@ class CounterfactualLoss(nn.Module):
         """
         # 1. Logit-level Consistency & Discrepancy
         num_targets = pred_original.size(1) if (pred_original.dim() >= 2 and pred_original.size(1) > 1) else 1.0
-        if self.is_expression and pred_original.dim() == 2 and pred_original.size(1) > 1:
-            # Multi-class emotion probabilities: KL divergence or MSE
-            p_orig = pred_original.clamp(1e-6, 1.0)
-            p_unimp = pred_unimportant_perturbed.clamp(1e-6, 1.0)
-            logit_consist = F.kl_div(p_unimp.log(), p_orig, reduction='batchmean')
-            diff_important = F.mse_loss(pred_important_perturbed, pred_original) * num_targets
-            logit_discrep = torch.clamp(1.0 - diff_important, min=0.0)
-        else:
-            logit_consist = F.mse_loss(pred_unimportant_perturbed, pred_original)
-            diff_important = F.mse_loss(pred_important_perturbed, pred_original) * num_targets
-            logit_discrep = torch.clamp(1.0 - diff_important, min=0.0)
+        # AU and expression heads both use independent sigmoid probabilities;
+        # KL divergence would incorrectly assume a normalized categorical
+        # distribution for expressions. MSE is the matching multi-label metric.
+        logit_consist = F.mse_loss(pred_unimportant_perturbed, pred_original)
+        diff_important = F.mse_loss(pred_important_perturbed, pred_original) * num_targets
+        logit_discrep = torch.clamp(1.0 - diff_important, min=0.0)
         
         # 2. Feature-level Consistency & Discrepancy (Cosine Distance)
         if (
@@ -437,11 +408,11 @@ class CounterfactualLoss(nn.Module):
         ):
             # Feature consistency: (1 - cos) -> minimize to 0
             cos_unimp = F.cosine_similarity(feat_original, feat_unimportant_perturbed, dim=-1)
-            feat_consist = (1.0 - cos_unimp).mean()
+            feat_consist = (1.0 - cos_unimp).clamp_min(0.0).mean()
             
             # Feature discrepancy: (1 + cos) -> minimize (forces orthogonality or divergence)
             cos_imp = F.cosine_similarity(feat_original, feat_important_perturbed, dim=-1)
-            feat_discrep = (1.0 + cos_imp).mean()
+            feat_discrep = (1.0 + cos_imp).clamp_min(0.0).mean()
             
             loss_unimportant = self.delta_feat * feat_consist + self.delta_logit * logit_consist
             loss_important = self.eta_feat * feat_discrep + self.eta_logit * logit_discrep
@@ -476,8 +447,9 @@ class FACSAUViolationLoss(nn.Module):
        - Opposing head rotations (AU 51/52, 53/54, 55/56)
        - Opposing conjugate gaze (AU 61/62, 63/64)
     """
-    def __init__(self):
+    def __init__(self, au_ids):
         super().__init__()
+        self.au_index = {int(au): i for i, au in enumerate(au_ids)}
         
     def forward(self, au_probs):
         """
@@ -488,11 +460,9 @@ class FACSAUViolationLoss(nn.Module):
         """
         device = au_probs.device
         loss = torch.tensor(0.0, device=device)
-        from config import AU_INDEX
-        
         def get_p(au_num):
-            if au_num in AU_INDEX:
-                return au_probs[:, AU_INDEX[au_num]]
+            if au_num in self.au_index:
+                return au_probs[:, self.au_index[au_num]]
             return None
             
         p_25 = get_p(25)
@@ -567,6 +537,12 @@ class WeightedAsymmetricLoss(nn.Module):
         x: p^a (B, N_a) probabilities after sigmoid
         y: y^a (B, N_a) ground-truth labels (0/1)
         """
+        if x.dim() != 2 or y.shape != x.shape:
+            raise ValueError(f"WAL expects matching rank-2 tensors, got {tuple(x.shape)} and {tuple(y.shape)}")
+        if self.weight is not None and self.weight.numel() != x.size(1):
+            raise ValueError(
+                f"WAL weight count {self.weight.numel()} does not match {x.size(1)} AU outputs"
+            )
         xs_pos = x
         xs_neg = 1.0 - x
 
@@ -592,7 +568,8 @@ class WeightedAsymmetricLoss(nn.Module):
 class ExpressionBCELoss(nn.Module):
     """
     Expression BCE Loss from MultiviewSymAU (Eq. 4).
-    Standard multi-label BCE over emotion probabilities without asymmetric weighting.
+    Eq. (4) from SymGraphAU. The negative term is weighted by the predicted
+    probability, exactly as written in the paper.
     """
     def __init__(self, eps=1e-8):
         super().__init__()
@@ -603,11 +580,20 @@ class ExpressionBCELoss(nn.Module):
         pred_probs: p^e (B, N_e) emotion probabilities after sigmoid
         targets_one_hot: y^e (B, N_e) one-hot pseudo-labels
         """
+        if pred_probs.shape != targets_one_hot.shape:
+            raise ValueError(
+                f"expression predictions and targets must have the same shape; "
+                f"got {tuple(pred_probs.shape)} and {tuple(targets_one_hot.shape)}"
+            )
         xs_pos = pred_probs
         xs_neg = 1.0 - pred_probs
 
         los_pos = targets_one_hot * torch.log(xs_pos.clamp(min=self.eps))
-        los_neg = (1.0 - targets_one_hot) * torch.log(xs_neg.clamp(min=self.eps))
+        los_neg = (
+            (1.0 - targets_one_hot)
+            * pred_probs
+            * torch.log(xs_neg.clamp(min=self.eps))
+        )
         loss = los_pos + los_neg
         loss = loss.mean(dim=-1)
         return -loss.mean()
@@ -620,13 +606,16 @@ class ExpressionBCELoss(nn.Module):
 class CausalCycleLoss(nn.Module):
     """
     Idea 4: Cross-Task Bidirectional Causal Cycle Consistency.
-    Projects predicted expressions back to expected AU activations via the transposed M_AE matrix.
+    Projects predicted expressions back to expected AU activations via the
+    canonical expression-to-AU support matrix.
     Adds a top-down cycle loss to ensure the hierarchical predictions are consistent.
     """
-    def __init__(self):
+    def __init__(self, rule_matrix):
         super().__init__()
-        from models.symgraphau import M_AE_DISFA
-        self.register_buffer("M_AE", M_AE_DISFA.t().clone().detach().float())
+        rule_matrix = torch.as_tensor(rule_matrix, dtype=torch.float32)
+        if rule_matrix.dim() != 2:
+            raise ValueError("rule_matrix must have shape (N_expression, N_AU)")
+        self.register_buffer("rule_matrix", rule_matrix)
 
     def forward(self, emotion_probs, au_probs):
         """
@@ -634,7 +623,12 @@ class CausalCycleLoss(nn.Module):
             emotion_probs: (B, N_EMO)
             au_probs: (B, N_AU)
         """
-        # M_AE is (N_EMO, N_AU), where 1 means emotion involves AU
+        if emotion_probs.size(1) != self.rule_matrix.size(0):
+            raise ValueError("emotion probability dimension does not match rule_matrix")
+        if au_probs.size(1) != self.rule_matrix.size(1):
+            raise ValueError("AU probability dimension does not match rule_matrix")
+        # rule_matrix is (N_EMO, N_AU), where a positive value means the
+        # expression has a verified primary or secondary AU relation.
         # To project from Emotion down to AU, we say an AU is expected to be active
         # if ANY of the active emotions require it.
         # Probabilistic OR: P(A U B) = 1 - (1 - P(A))(1 - P(B))
@@ -643,8 +637,8 @@ class CausalCycleLoss(nn.Module):
         # Expand dims for broadcasting
         # emotion_probs: (B, N_EMO, 1)
         e_probs = emotion_probs.unsqueeze(-1)
-        # M_AE: (1, N_EMO, N_AU)
-        m_ae = self.M_AE.unsqueeze(0)
+        # rule_matrix: (1, N_EMO, N_AU)
+        m_ae = self.rule_matrix.unsqueeze(0)
         
         # Effective prob contribution from each emotion to each AU
         effective_p = e_probs * m_ae  # (B, N_EMO, N_AU)

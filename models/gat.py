@@ -38,15 +38,16 @@ class DenseDynamicGraphConv(nn.Module):
         dynamic_logits = torch.matmul(Q, K.transpose(1, 2)) / (d_k ** 0.5)  # (B, N, N)
         dynamic_adj = torch.sigmoid(dynamic_logits)  # Sample-specific edge probabilities
         
-        # 2. Global Invariant Graph
-        global_adj = torch.sigmoid(global_adj_logits)  # (N, N)
+        # 2. Global signed graph.  The convention is source -> target:
+        # global_adj_logits[source, target].  Matmul rows are receivers, so
+        # transpose before message passing.
+        global_adj = torch.tanh(global_adj_logits).transpose(0, 1)
         
-        # 3. Combine Static and Dynamic Adjacencies
-        # We element-wise multiply the global DAG probabilities with the dynamic affinities
+        # 3. Combine signed global edges with positive dynamic affinities.
         combined_adj = global_adj.unsqueeze(0) * dynamic_adj  # (B, N, N)
         
-        # Row-normalize (like standard attention/GCN)
-        combined_adj = combined_adj / (combined_adj.sum(dim=-1, keepdim=True) + 1e-8)
+        # Normalize by absolute mass so inhibitory edges retain their sign.
+        combined_adj = combined_adj / (combined_adj.abs().sum(dim=-1, keepdim=True) + 1e-8)
         
         # 4. Message Passing with Residual Connection
         out = torch.matmul(combined_adj, V)  # (B, N, D')
@@ -58,7 +59,7 @@ class AUGraphModule(nn.Module):
     """
     Constructs two graphs via DenseDynamicGraphConv:
     1. AU-AU graph: models relationships between AU embeddings
-    2. AU-Expression graph: models relationships between AU and Expression embeddings
+    2. AU-Expression graph: a strict one-way AU -> Expression graph
     
     Each graph produces a learned global adjacency matrix (edge weights) combined with 
     sample-adaptive routing.
@@ -90,10 +91,18 @@ class AUGraphModule(nn.Module):
         # ============================================================
         # AU-Expression Graph
         # ============================================================
-        num_nodes_ae = num_aus + num_emotions
-        
-        # Learnable global adjacency matrix for AU-Exp
-        self.au_exp_adj = nn.Parameter(torch.randn(num_nodes_ae, num_nodes_ae) * 0.01)
+        # Only AU -> Expression edges are learnable.  The complete matrix
+        # used by DenseDynamicGraphConv is constructed as:
+        #
+        #   [ 0          AU->Expression ]
+        #   [ 0                    0    ]
+        #
+        # Since DenseDynamicGraphConv transposes source->target adjacency
+        # before message passing, only expression nodes receive AU messages.
+        # Expressions can never send messages back to AUs.
+        self.au_to_expr_adj = nn.Parameter(
+            torch.randn(num_aus, num_emotions) * 0.01
+        )
         
         self.au_exp_layers = nn.ModuleList()
         in_dim = embed_dim
@@ -104,6 +113,17 @@ class AUGraphModule(nn.Module):
         self.au_exp_proj = nn.Linear(in_dim, embed_dim)
         nn.init.normal_(self.au_exp_proj.weight, std=0.01)
         nn.init.zeros_(self.au_exp_proj.bias)
+
+    def _build_au_to_expr_adjacency(self):
+        """Build the fixed-topology source->target adjacency matrix."""
+        zero_au_au = self.au_to_expr_adj.new_zeros(self.num_aus, self.num_aus)
+        zero_expr_au = self.au_to_expr_adj.new_zeros(self.num_emotions, self.num_aus)
+        zero_expr_expr = self.au_to_expr_adj.new_zeros(
+            self.num_emotions, self.num_emotions
+        )
+        top = torch.cat([zero_au_au, self.au_to_expr_adj], dim=1)
+        bottom = torch.cat([zero_expr_au, zero_expr_expr], dim=1)
+        return torch.cat([top, bottom], dim=0)
     
     def forward_au_au(self, au_embeddings_stacked):
         """
@@ -113,16 +133,14 @@ class AUGraphModule(nn.Module):
             au_embeddings_stacked: (B, N_AU, D) stacked AU embeddings
         Returns:
             x: (B, N_AU, D) updated AU embeddings after graph reasoning
-            au_au_adj_sigmoid: (N_AU, N_AU) global learned adjacency weights
+            au_au_adj_logits: (N_AU, N_AU) signed source -> target logits
         """
         x = au_embeddings_stacked
         for layer in self.au_au_layers:
             x = layer(x, self.au_au_adj)
             
         x = au_embeddings_stacked + self.au_au_proj(x)
-        au_au_adj_sigmoid = torch.sigmoid(self.au_au_adj)
-        
-        return x, au_au_adj_sigmoid
+        return x, self.au_au_adj
     
     def forward_au_exp(self, au_embeddings_stacked, emotion_embeddings_stacked):
         """
@@ -133,14 +151,14 @@ class AUGraphModule(nn.Module):
             emotion_embeddings_stacked: (B, N_EMO, D) emotion embeddings
         Returns:
             x: (B, N_AU + N_EMO, D) updated node embeddings
-            au_exp_adj_sigmoid: (N_AU + N_EMO, N_AU + N_EMO) global adjacency weights
+            au_exp_adj_logits: (N_AU + N_EMO, N_AU + N_EMO) signed source -> target logits
+                with only the AU -> Expression block learnable/nonzero
         """
         node_features = torch.cat([au_embeddings_stacked, emotion_embeddings_stacked], dim=1)
+        au_exp_adj = self._build_au_to_expr_adjacency()
         x = node_features
         for layer in self.au_exp_layers:
-            x = layer(x, self.au_exp_adj)
+            x = layer(x, au_exp_adj)
             
         x = node_features + self.au_exp_proj(x)
-        au_exp_adj_sigmoid = torch.sigmoid(self.au_exp_adj)
-        
-        return x, au_exp_adj_sigmoid
+        return x, au_exp_adj

@@ -17,8 +17,11 @@ import torch
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.jit.*")
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
-from config import ModelConfig, DISFA_AUS
-from dataset import DISFADataset
+from config import (
+    ModelConfig, DISFA_AUS, BP4D_AUS, get_dataset_aus,
+    get_dataset_au_expression_prior,
+)
+from dataset import DISFADataset, BP4DDataset
 from models.ctrlau import CtrlAUModel
 
 
@@ -31,9 +34,26 @@ def adjust_learning_rate(optimizer, epoch, epochs, init_lr, iteration, num_iter)
         param_group['lr'] = lr
 
 
+def keep_frozen_modules_eval(model):
+    """Prevent frozen BatchNorm buffers from drifting during graph phases."""
+    if getattr(model, "phase", None) not in (2, 3):
+        return
+
+    frozen_modules = [
+        "backbone", "global_linear", "au_head", "emotion_head",
+        "text_encoder", "visual_proj", "text_proj",
+        "emotion_visual_proj", "emotion_text_proj",
+    ]
+    for module_name in frozen_modules:
+        module = getattr(model, module_name, None)
+        if module is not None:
+            module.eval()
+
+
 def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_lr=1e-4):
     """Train for one epoch."""
     model.train()
+    keep_frozen_modules_eval(model)
     running_losses = {}
     num_batches = 0
     
@@ -102,8 +122,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
                 if ("loss_causal_au" in running_losses and running_losses['loss_causal_au'] > 0) or ("loss_causal_exp" in running_losses and running_losses['loss_causal_exp'] > 0):
                     l_c = (running_losses.get('loss_causal_au', 0.0) + running_losses.get('loss_causal_exp', 0.0)) / num_batches
                     msg += f", L_causal: {l_c:.4f}"
-                if "loss_facs_exp" in running_losses and running_losses['loss_facs_exp'] > 0:
-                    msg += f", L_facs_exp: {running_losses['loss_facs_exp'] / num_batches:.4f}"
+                if "loss_au_expression_support" in running_losses and running_losses['loss_au_expression_support'] > 0:
+                    msg += f", L_au_exp_prior: {running_losses['loss_au_expression_support'] / num_batches:.4f}"
                 if "loss_cf_au_imp" in running_losses and running_losses['loss_cf_au_imp'] > 0:
                     msg += f", CF_au: {running_losses['loss_cf_au_imp'] / num_batches:.4f}"
                 if "loss_cf_exp_imp" in running_losses and running_losses['loss_cf_exp_imp'] > 0:
@@ -123,7 +143,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, device, phase=1):
+def evaluate(model, dataloader, device, au_ids, phase=1):
     """Evaluate model."""
     model.eval()
     all_preds = []
@@ -152,7 +172,7 @@ def evaluate(model, dataloader, device, phase=1):
     preds_binary = (all_preds > 0.5).float()
     
     f1_scores = []
-    for i, au in enumerate(DISFA_AUS):
+    for i, au in enumerate(au_ids):
         tp = ((preds_binary[:, i] == 1) & (all_labels[:, i] == 1)).sum().float()
         fp = ((preds_binary[:, i] == 1) & (all_labels[:, i] == 0)).sum().float()
         fn = ((preds_binary[:, i] == 0) & (all_labels[:, i] == 1)).sum().float()
@@ -173,13 +193,33 @@ def main():
         "--data_root", 
         type=str, 
         default=os.path.join(os.path.dirname(__file__), "DISFA_Data"),
-        help="Path to the DISFA dataset root folder containing 'img' and 'ActionUnit_Labels'"
+        help="Path to the selected dataset root containing its official image/list layout"
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="disfa",
+        choices=["disfa", "bp4d"],
+        help="Benchmark protocol and AU vocabulary",
     )
     parser.add_argument(
         "--resume",
         type=str,
         default="",
         help="Path to a checkpoint (.pth file) to resume training from"
+    )
+    parser.add_argument(
+        "--resume_phase",
+        type=int,
+        default=None,
+        choices=[1, 2, 3, 4],
+        help="Phase that produced a legacy raw state-dict checkpoint (optional)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=os.path.join(os.path.dirname(__file__), "checkpoints"),
+        help="Directory for phase/fold-specific checkpoints",
     )
     parser.add_argument(
         "--phase",
@@ -198,9 +238,9 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="symgraphau",
+        default="ctrlau",
         choices=["symgraphau", "ctrlau"],
-        help="Model architecture: 'symgraphau' (MultiviewSymAU Phase 1) or 'ctrlau' (Upgraded CtrlAU)"
+        help="Model architecture: 'ctrlau' (default) or 'symgraphau' (explicit baseline only)"
     )
     parser.add_argument(
         "--lr", "-lr",
@@ -233,11 +273,21 @@ def main():
         help="Intervention strength factor alpha for counterfactual subspace erasure (default: 5.0)",
     )
     args = parser.parse_args()
+    if args.model == "symgraphau" and args.phase != 1:
+        raise ValueError("The copied legacy SymGraphAU wrapper supports phase 1 only; use CtrlAU for graph phases")
+    if args.model == "symgraphau" and args.dataset != "disfa":
+        raise ValueError("The copied legacy SymGraphAU wrapper is DISFA-only; use CtrlAU for BP4D")
+    output_dir = os.path.abspath(args.output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
     cfg = ModelConfig()
     cfg.batch_size = args.batch_size
     cfg.num_epochs = args.epochs
     cfg.cf_intervention_scale = args.cf_scale
+    cfg.phase = args.phase
+    cfg.dataset_name = args.dataset
+    cfg.au_ids = get_dataset_aus(args.dataset)
+    cfg.au_expression_prior = get_dataset_au_expression_prior(args.dataset)
 
     # ---- Seeding (identical to ynhi's conf.py set_env) ----
     random.seed(args.seed)
@@ -250,10 +300,13 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    au_ids = tuple(cfg.au_ids)
+    print(f"Dataset: {args.dataset.upper()}, AUs: {list(au_ids)}")
     print(f"Model: {args.model}, Phase: {args.phase}, Fold: {args.fold}")
     print(f"Learning rate: {args.lr}, Batch size: {cfg.batch_size}, Epochs: {cfg.num_epochs}, Seed: {args.seed}")
     
-    # Exact DISFA 3-Fold Splits from MultiviewSymAU
+    # Exact DISFA 3-Fold splits from MultiviewSymAU. BP4D uses its prepared
+    # train/test list files for the same fold number.
     group_1 = ["SN002", "SN010", "SN001", "SN026", "SN027", "SN032", "SN030", "SN009", "SN016"]
     group_2 = ["SN013", "SN018", "SN011", "SN028", "SN012", "SN006", "SN031", "SN021", "SN024"]
     group_3 = ["SN003", "SN029", "SN023", "SN025", "SN008", "SN005", "SN007", "SN017", "SN004"]
@@ -269,11 +322,20 @@ def main():
         val_subjects = group_1
         
     print(f"--- FOLD {args.fold} SPLIT ---")
-    print(f"Train subjects ({len(train_subjects)}): {train_subjects}")
-    print(f"Val subjects ({len(val_subjects)}): {val_subjects}")
-    
-    train_dataset = DISFADataset(data_root=args.data_root, subjects=train_subjects, train=True, fold=args.fold)
-    val_dataset = DISFADataset(data_root=args.data_root, subjects=val_subjects, train=False, fold=args.fold)
+    if args.dataset == "disfa":
+        print(f"Train subjects ({len(train_subjects)}): {train_subjects}")
+        print(f"Val subjects ({len(val_subjects)}): {val_subjects}")
+        train_dataset = DISFADataset(
+            data_root=args.data_root, subjects=train_subjects, train=True, fold=args.fold
+        )
+        val_dataset = DISFADataset(
+            data_root=args.data_root, subjects=val_subjects, train=False, fold=args.fold
+        )
+    else:
+        if args.model == "symgraphau":
+            raise ValueError("The copied legacy SymGraphAU wrapper is DISFA-only; use --model ctrlau for BP4D")
+        train_dataset = BP4DDataset(data_root=args.data_root, train=True, fold=args.fold)
+        val_dataset = BP4DDataset(data_root=args.data_root, train=False, fold=args.fold)
     
     print(f"Train samples: {len(train_dataset)}")
     print(f"Val samples:   {len(val_dataset)}")
@@ -281,9 +343,7 @@ def main():
     if len(train_dataset) == 0 or len(val_dataset) == 0:
         raise ValueError(
             f"Dataset is empty! Found {len(train_dataset)} train samples and {len(val_dataset)} val samples.\n"
-            f"Please check that --data_root points to the DISFA directory containing either:\n"
-            f"  1) 'list/' (with DISFA_train_..._fold{args.fold}.txt) and 'img/' folder, OR\n"
-            f"  2) 'ActionUnit_Labels/' and 'img/' folders."
+            f"Please check that --data_root points to the official {args.dataset.upper()} layout."
         )
     
     # DataLoader settings matching original repo (no drop_last)
@@ -307,45 +367,20 @@ def main():
     if hasattr(model, "set_phase"):
         model.set_phase(args.phase)
         
-    # ------------------------------------------------------------
-    # Prior AU Class Weights (Fold-Specific Inverse Frequencies)
-    # ------------------------------------------------------------
-    loaded = False
-    resolved_root = getattr(train_dataset, "data_root", args.data_root)
-    weight_file_candidates = [
-        os.path.join(resolved_root, "list", f"DISFA_train_weight_fold{args.fold}.txt"),
-        os.path.join(resolved_root, "list", f"DISFA_weight_fold{args.fold}.txt"),
-        os.path.join(resolved_root, f"DISFA_train_weight_fold{args.fold}.txt"),
-        os.path.join(resolved_root, f"DISFA_weight_fold{args.fold}.txt"),
-        os.path.join(args.data_root, "list", f"DISFA_train_weight_fold{args.fold}.txt"),
-        os.path.join(args.data_root, "list", f"DISFA_weight_fold{args.fold}.txt"),
-        os.path.join(args.data_root, f"DISFA_train_weight_fold{args.fold}.txt"),
-        os.path.join(args.data_root, f"DISFA_weight_fold{args.fold}.txt"),
-    ]
-    for w_path in weight_file_candidates:
-        if os.path.isfile(w_path):
-            print(f"Loading AU class weights for Fold {args.fold} from: {w_path}")
-            loaded_weights = torch.from_numpy(np.loadtxt(w_path)).float().to(device)
-            if hasattr(model, "update_class_weights"):
-                model.update_class_weights(loaded_weights)
-            elif hasattr(model, "wal_loss"):
-                model.wal_loss.weight = loaded_weights
-            loaded = True
-            break
-            
-    if not loaded:
-        print(f"Weight file not found in dataset. Calculating prior class weights directly from training set (Fold {args.fold})...")
-        computed_weights, occur_rates = train_dataset.calculate_class_weights()
-        if computed_weights is not None:
-            computed_weights = computed_weights.to(device)
-            if hasattr(model, "update_class_weights"):
-                model.update_class_weights(computed_weights)
-            elif hasattr(model, "wal_loss"):
-                model.wal_loss.weight = computed_weights
-            print(f"Successfully calculated AU weights for Fold {args.fold} (sum={computed_weights.sum().item():.2f}):")
-            for au_idx, au_id in enumerate(DISFA_AUS):
-                rate_pct = occur_rates[au_idx].item() * 100
-                print(f"  AU{au_id:<2}: weight={computed_weights[au_idx].item():.4f} (occurrence: {rate_pct:.2f}%)")
+    # Class weights must come from the selected training split.  This avoids
+    # silently reusing weights from another dataset, fold, or AU ordering.
+    print(f"Calculating AU class weights from the {args.dataset.upper()} training split...")
+    computed_weights, occur_rates = train_dataset.calculate_class_weights()
+    if computed_weights is None:
+        raise ValueError("Dataset did not provide class weights for a non-empty training split")
+    computed_weights = computed_weights.to(device)
+    if not hasattr(model, "update_class_weights"):
+        raise TypeError("Selected model does not implement dataset-specific AU class weights")
+    model.update_class_weights(computed_weights)
+    print(f"AU weights (sum={computed_weights.sum().item():.2f}):")
+    for au_idx, au_id in enumerate(au_ids):
+        rate_pct = occur_rates[au_idx].item() * 100
+        print(f"  AU{au_id:<2}: weight={computed_weights[au_idx].item():.4f} (occurrence: {rate_pct:.2f}%)")
     
     # ==========================================
     # 3-Phase Training Logic
@@ -362,7 +397,6 @@ def main():
             model.cfg.lambda_decorr = 1e-2
             model.cfg.lambda_contrastive = 0.05
             model.cfg.lambda_emo_contrastive = 0.05
-            model.cfg.lambda_facs_au = 0.0
         else:
             print("Pure SymGraphAU: MultiviewSymAU Stage 1 Baseline (No Phase 1 regularizers)")
             model.cfg.lambda_ib = 0.0
@@ -375,13 +409,11 @@ def main():
         model.cfg.lambda_dag = 0.0
         model.cfg.lambda_causal_au = 0.0
         model.cfg.lambda_causal_exp = 0.0
-        model.cfg.lambda_facs_exp = 0.0
+        model.cfg.lambda_au_expression_prior = 0.0
         model.cfg.lambda_au_au = 0.0
         model.cfg.lambda_graph_au = 0.0
         model.cfg.lambda_graph_emo = 0.0
         model.cfg.lambda_cycle = 0.0
-        model.cfg.lambda_cf_important = 0.0
-        model.cfg.lambda_cf_unimportant = 0.0
         
     elif args.phase == 2:
         print("=== Phase 2: Causal Graph Routing ===")
@@ -422,7 +454,7 @@ def main():
         model.cfg.lambda_decorr = 0.0
         model.cfg.lambda_contrastive = 0.0
         model.cfg.lambda_emo_contrastive = 0.0
-        model.cfg.lambda_facs_au = 0.0
+        model.cfg.lambda_facs_au = 0.05 if args.model == "ctrlau" else 0.0
         
         # Enable Graph & Cycle weights
         model.cfg.lambda_au_au = 1.0
@@ -434,9 +466,7 @@ def main():
         # NO Counterfactual losses in Phase 2
         model.cfg.lambda_causal_au = 0.0
         model.cfg.lambda_causal_exp = 0.0
-        model.cfg.lambda_facs_exp = 0.0
-        model.cfg.lambda_cf_important = 0.0
-        model.cfg.lambda_cf_unimportant = 0.0
+        model.cfg.lambda_au_expression_prior = 0.05 if args.model == "ctrlau" else 0.0
         model.cfg.lambda_cf_au_imp = 0.0
         model.cfg.lambda_cf_au_unimp = 0.0
         model.cfg.lambda_cf_exp_imp = 0.0
@@ -466,7 +496,7 @@ def main():
         model.cfg.lambda_decorr = 0.0
         model.cfg.lambda_contrastive = 0.0
         model.cfg.lambda_emo_contrastive = 0.0
-        model.cfg.lambda_facs_au = 0.0
+        model.cfg.lambda_facs_au = 0.05 if args.model == "ctrlau" else 0.0
         
         # Graph & Cycle weights active (dominant task supervision)
         model.cfg.lambda_au_au = 1.0
@@ -478,9 +508,7 @@ def main():
         # Balanced CF weights (0.05) so counterfactual regularization doesn't overpower task accuracy
         model.cfg.lambda_causal_au = 0.05
         model.cfg.lambda_causal_exp = 0.05
-        model.cfg.lambda_facs_exp = 0.05
-        model.cfg.lambda_cf_important = 0.05
-        model.cfg.lambda_cf_unimportant = 0.05
+        model.cfg.lambda_au_expression_prior = 0.05 if args.model == "ctrlau" else 0.0
         model.cfg.lambda_cf_au_imp = 0.05
         model.cfg.lambda_cf_au_unimp = 0.05
         model.cfg.lambda_cf_exp_imp = 0.05
@@ -503,14 +531,38 @@ def main():
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     
+    resume_payload = None
+    checkpoint_phase = None
     if args.resume:
         if os.path.isfile(args.resume):
             print(f"Loading checkpoint from: {args.resume}")
-            ckpt = torch.load(args.resume, map_location=device)
-            if isinstance(ckpt, dict) and "state_dict" in ckpt:
-                ckpt = ckpt["state_dict"]
-            elif isinstance(ckpt, dict) and "model" in ckpt:
-                ckpt = ckpt["model"]
+            raw_ckpt = torch.load(args.resume, map_location=device)
+            ckpt = raw_ckpt
+            if isinstance(raw_ckpt, dict) and ("state_dict" in raw_ckpt or "model" in raw_ckpt):
+                resume_payload = raw_ckpt
+                checkpoint_phase = raw_ckpt.get("phase")
+                ckpt = raw_ckpt.get("state_dict", raw_ckpt.get("model"))
+
+            checkpoint_dataset = resume_payload.get("dataset") if resume_payload else None
+            checkpoint_aus = tuple(resume_payload.get("au_ids", ())) if resume_payload else ()
+            checkpoint_topology = resume_payload.get("graph_topology") if resume_payload else None
+            if args.model == "ctrlau" and checkpoint_topology != "au_to_expression":
+                raise ValueError(
+                    "Checkpoint does not use the current strict AU->Expression graph topology; "
+                    "start Phase 2/3 from a checkpoint produced after this architecture change."
+                )
+            if checkpoint_dataset is None or not checkpoint_aus:
+                if args.resume_phase is None:
+                    raise ValueError(
+                        "Checkpoint has no dataset/AU metadata. Pass --resume_phase explicitly "
+                        "for a legacy checkpoint; new checkpoints are self-describing."
+                    )
+            else:
+                if checkpoint_dataset != args.dataset or checkpoint_aus != au_ids:
+                    raise ValueError(
+                        f"Checkpoint protocol mismatch: checkpoint={checkpoint_dataset}/{checkpoint_aus}, "
+                        f"requested={args.dataset}/{au_ids}"
+                    )
 
             # Standardize key names (remove 'module.' or 'stage1.' prefixes)
             from collections import OrderedDict
@@ -527,11 +579,15 @@ def main():
             print(f"  Missing keys (uninitialized in P1, e.g. Graph heads in Phase 2): {len(missing)}")
             print(f"  Unexpected keys: {len(unexpected)}")
             
-            # If starting Phase 2 from Phase 1 weights, copy calibrated classifiers into graph heads
-            if args.phase >= 2 and any("graph_au_classifiers" in k for k in missing):
+            # If starting Phase 2 from Phase 1 weights, copy calibrated classifiers into graph heads.
+            # New checkpoints carry phase metadata; --resume_phase handles old raw state dicts.
+            source_phase = checkpoint_phase if checkpoint_phase is not None else args.resume_phase
+            if args.phase >= 2 and args.model == "ctrlau" and source_phase == 1:
                 if hasattr(model, "init_graph_classifiers_from_base"):
                     model.init_graph_classifiers_from_base()
                     print("  [CtrlAU] Successfully initialized graph classifiers from trained Phase 1 AU/Emotion heads!")
+            elif args.phase >= 2 and args.model == "ctrlau" and checkpoint_phase is None and args.resume_phase is None:
+                print("  [CtrlAU] Legacy raw checkpoint: pass --resume_phase 1 when promoting Phase 1 weights.")
         else:
             print(f"Warning: Checkpoint file '{args.resume}' not found. Starting from scratch.")
     else:
@@ -552,13 +608,21 @@ def main():
         weight_decay=cfg.weight_decay,
     )
     print(f"Initial learning rate: {args.lr:.2e}")
+
+    start_epoch = 1
+    if resume_payload is not None and checkpoint_phase == args.phase:
+        optimizer_state = resume_payload.get("optimizer")
+        if optimizer_state is not None:
+            optimizer.load_state_dict(optimizer_state)
+            start_epoch = int(resume_payload.get("epoch", 0)) + 1
+            print(f"Resuming phase {args.phase} at epoch {start_epoch}.")
     
     # No epoch-level scheduler — LR is adjusted per-batch inside train_one_epoch
     # using adjust_learning_rate() (cosine annealing matching original repo)
     
     # Training loop
     best_f1 = 0.0
-    for epoch in range(1, cfg.num_epochs + 1):
+    for epoch in range(start_epoch, cfg.num_epochs + 1):
         print(f"\n{'='*60}")
         print(f"Epoch {epoch}/{cfg.num_epochs}")
         print(f"{'='*60}")
@@ -567,18 +631,41 @@ def main():
         
         # Evaluate
         print("Validation:")
-        avg_f1 = evaluate(model, val_loader, device, phase=args.phase)
+        avg_f1 = evaluate(model, val_loader, device, au_ids=au_ids, phase=args.phase)
         
-        # Save checkpoint for this specific epoch
-        epoch_ckpt_path = f"ctrlau_epoch_{epoch}.pth"
-        torch.save(model.state_dict(), epoch_ckpt_path)
+        # Phase 1 graph heads are frozen, so synchronize them with the trained
+        # base heads before writing a checkpoint for the next phase.
+        if args.model == "ctrlau" and args.phase == 1:
+            model.init_graph_classifiers_from_base()
+
+        checkpoint = {
+            "state_dict": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "phase": args.phase,
+            "fold": args.fold,
+            "model": args.model,
+            "dataset": args.dataset,
+            "au_ids": list(au_ids),
+            "num_emotions": getattr(model, "num_emotions", None),
+            "graph_topology": "au_to_expression",
+        }
+        epoch_ckpt_path = os.path.join(
+            output_dir,
+            f"{args.model}_phase{args.phase}_fold{args.fold}_epoch{epoch}.pth",
+        )
+        torch.save(checkpoint, epoch_ckpt_path)
         print(f"  -> Saved epoch checkpoint: {epoch_ckpt_path}")
 
         # Save best model
         if avg_f1 > best_f1:
             best_f1 = avg_f1
-            torch.save(model.state_dict(), "ctrlau_best.pth")
-            print(f"  -> New best F1: {best_f1:.4f}, 'ctrlau_best.pth' updated.")
+            best_ckpt_path = os.path.join(
+                output_dir,
+                f"{args.model}_phase{args.phase}_fold{args.fold}_best.pth",
+            )
+            torch.save(checkpoint, best_ckpt_path)
+            print(f"  -> New best F1: {best_f1:.4f}, '{best_ckpt_path}' updated.")
     
     print(f"\nTraining complete. Best F1: {best_f1:.4f}")
 

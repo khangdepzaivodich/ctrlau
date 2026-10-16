@@ -12,12 +12,14 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    DISFA_AUS, NUM_AUS, AU_DESCRIPTIONS, NUM_EMOTIONS,
-    ModelConfig, EMOTION_DESCRIPTIONS, EMOTIONS
+    AU_DESCRIPTIONS, ModelConfig, CTRL_EMOTIONS, CTRL_NUM_EMOTIONS,
+    CTRL_EMOTION_DESCRIPTIONS, get_dataset_aus,
+    get_dataset_au_expression_prior, prior_support_matrix,
+    compute_expression_pseudo_labels,
 )
 from losses import (
     HSICDisentanglementLoss, ContrastiveLoss, DAGLoss,
-    ViolationLoss, FACSEmotionViolationLoss, CounterfactualLoss, FocalLoss,
+    ViolationLoss, AUExpressionSupportLoss, CounterfactualLoss,
     FACSAUViolationLoss, WeightedAsymmetricLoss, ExpressionBCELoss,
     CausalCycleLoss
 )
@@ -26,7 +28,7 @@ from .gat import AUGraphModule
 from .masks import MaskModule
 from .symgraphau import (
     LinearBlock, SymAUHead, SymExprHead,
-    M_AE_DISFA, SYM_EMOTIONS, NUM_SYM_EMOTIONS, EMB_DIM,
+    EMB_DIM,
     resnet50
 )
 
@@ -38,15 +40,15 @@ class CtrlAUModel(nn.Module):
     Phase 1 (Feature Extraction with Combined Regularizations):
     1. Image -> ResNet-50 -> z_img (2048-dim, 49 spatial patches)
     2. z_img -> LinearBlock (2048 -> 512) -> feat (49, 512)
-    3. feat -> SymAUHead (8 branches) -> V_a (embeddings) + p_a (AU probabilities)
-    4. feat -> SymExprHead (7 branches) -> V_e (embeddings) + p_e (Emotion probabilities)
-    5. Y_a -> au_to_expr_pseudo(M_AE) -> Y_e (one-hot expression target with Neutral=6)
+    3. feat -> SymAUHead (dataset AU branches) -> V_a + p_a
+    4. feat -> SymExprHead (8 expression branches) -> V_e + p_e
+    5. Y_a -> published M_A-E prior -> one-hot expression target
     6. Loss L_wa = WeightedAsymmetricLoss(p_a, Y_a)
     7. Loss L_we = ExpressionBCELoss(p_e, Y_e)
     8. CtrlAU Regularizers:
        - HSIC Disentanglement: L_ib, L_align, L_decorr
        - CLIP Text-Visual Contrastive: L_contrastive (AUs) + L_emo_contrastive (Emotions)
-       - FACS AU Violation: L_facs_au (evaluates anatomical constraints; disabled for DISFA 8-AU subset)
+       - No FACS loss (introduced only after graph construction)
     9. Phase 1 Total Loss = L_wa + 0.05 * L_we + CtrlAU regularizers
     
     Phase 2 (Graph Learning & Relational Reasoning):
@@ -62,12 +64,23 @@ class CtrlAUModel(nn.Module):
         if cfg is None:
             cfg = ModelConfig()
         self.cfg = cfg
-        self.phase = getattr(cfg, "phase", 1)
-        self.num_aus = NUM_AUS
-        self.num_emotions = NUM_SYM_EMOTIONS
-        
-        # Prior AU-Expression Matrix from MultiviewSymAU
-        self.register_buffer("M_AE", M_AE_DISFA)
+        self.phase = cfg.phase
+        self.dataset_name = cfg.dataset_name.lower()
+        self.au_ids = tuple(cfg.au_ids)
+        verified_au_ids = get_dataset_aus(self.dataset_name)
+        if self.au_ids != verified_au_ids:
+            raise ValueError(
+                f"cfg.au_ids {self.au_ids} do not match verified {self.dataset_name} AU order {verified_au_ids}"
+            )
+        self.num_aus = len(self.au_ids)
+        self.emotion_names = tuple(CTRL_EMOTIONS)
+        self.num_emotions = CTRL_NUM_EMOTIONS
+        self.au_expression_prior = get_dataset_au_expression_prior(self.dataset_name)
+        self.au_expression_support = prior_support_matrix(self.au_expression_prior)
+        supplied_prior = torch.as_tensor(cfg.au_expression_prior, dtype=torch.float32)
+        if not torch.equal(supplied_prior, self.au_expression_prior):
+            raise ValueError("cfg.au_expression_prior does not match the verified dataset prior")
+        self.register_buffer("paper_au_expression_prior", self.au_expression_prior)
         
         # MultiviewSymAU Stage 1 ResNet-50 Backbone (ImageNet V1 / resnet50-19c8e357)
         self.backbone = resnet50(pretrained=True)
@@ -83,14 +96,14 @@ class CtrlAUModel(nn.Module):
             clip_model_name=cfg.clip_model_name,
         )
         
-        # MultiviewSymAU Stage 1 8-branch AU Head
+        # MultiviewSymAU Stage 1 AU head; branch count follows the dataset.
         self.au_head = SymAUHead(
             in_channels=mid_channels,
-            num_aus=NUM_AUS,
+            num_aus=self.num_aus,
             hid_channels=mid_channels,
         )
         
-        # MultiviewSymAU Stage 1 7-branch Emotion Head
+        # Published SymGraphAU expression head (8 classes, including Contempt).
         self.emotion_head = SymExprHead(
             in_channels=mid_channels,
             num_expr=self.num_emotions,
@@ -99,7 +112,7 @@ class CtrlAUModel(nn.Module):
         
         self.graph_module = AUGraphModule(
             embed_dim=EMB_DIM,
-            num_aus=NUM_AUS,
+            num_aus=self.num_aus,
             num_emotions=self.num_emotions,
             gat_hidden_dim=cfg.gat_hidden_dim,
             gat_num_heads=cfg.gat_num_heads,
@@ -108,7 +121,7 @@ class CtrlAUModel(nn.Module):
         )
         
         self.mask_module = MaskModule(
-            num_aus=NUM_AUS,
+            num_aus=self.num_aus,
             num_emotions=self.num_emotions,
         )
         
@@ -139,10 +152,10 @@ class CtrlAUModel(nn.Module):
         
         # ---- Graph Classifiers ----
         self.au_au_classifiers = nn.ModuleList([
-            nn.Linear(EMB_DIM, 1) for _ in range(NUM_AUS)
+            nn.Linear(EMB_DIM, 1) for _ in range(self.num_aus)
         ])
         self.graph_au_classifiers = nn.ModuleList([
-            nn.Linear(EMB_DIM, 1) for _ in range(NUM_AUS)
+            nn.Linear(EMB_DIM, 1) for _ in range(self.num_aus)
         ])
         self.graph_emo_classifiers = nn.ModuleList([
             nn.Linear(EMB_DIM, 1) for _ in range(self.num_emotions)
@@ -168,56 +181,40 @@ class CtrlAUModel(nn.Module):
                 self.graph_emo_classifiers[i].bias.data.copy_(self.emotion_head.classifiers[i].bias.data)
         
         # ---- MultiviewSymAU Stage 1 Losses ----
-        raw_au_pos_weights = torch.tensor([
-            19.11, 22.18, 5.56, 11.67, 22.90, 6.76, 2.61, 10.34
-        ])
-        wal_weights = raw_au_pos_weights / raw_au_pos_weights.sum() * NUM_AUS
+        # Fold-specific class weights are supplied by the dataset in train.py.
+        # Until then, unit weights are the mathematically neutral WAL setting.
+        wal_weights = torch.ones(self.num_aus)
         self.register_buffer("wal_weights", wal_weights)
-        self.register_buffer("au_pos_weights", torch.sqrt(raw_au_pos_weights))
         
         # (1) L_wa: Weighted Asymmetric Loss on AU probabilities
         self.wal_loss = WeightedAsymmetricLoss(weight=self.wal_weights)
-        self.au_bce_loss = FocalLoss(gamma=2.0, pos_weight=torch.sqrt(raw_au_pos_weights))
         
         # (2) L_we: Expression BCE Loss on Emotion probabilities
         self.expression_bce_loss = ExpressionBCELoss()
         self.emotion_bce_loss = nn.BCELoss()
         
         # ---- Relational / Graph Loss modules ----
-        self.hsic_loss = HSICDisentanglementLoss(num_aus=NUM_AUS)
+        self.hsic_loss = HSICDisentanglementLoss(num_aus=self.num_aus)
         self.contrastive_loss = ContrastiveLoss(temperature=0.07)
-        self.dag_loss = DAGLoss(num_nodes=NUM_AUS)
+        self.dag_loss = DAGLoss(num_nodes=self.num_aus)
         self.violation_loss = ViolationLoss()
-        self.facs_emotion_violation_loss = FACSEmotionViolationLoss()
-        self.facs_au_violation_loss = FACSAUViolationLoss()
+        self.au_expression_support_loss = AUExpressionSupportLoss(self.au_expression_support)
+        self.facs_au_violation_loss = FACSAUViolationLoss(self.au_ids)
         # ---- Counterfactual Loss modules (Level 1: AU-AU, Level 2: AU-Exp) ----
         self.cf_loss = CounterfactualLoss() # backward compatibility
         self.cf_loss_au = CounterfactualLoss(is_expression=False)
         self.cf_loss_exp = CounterfactualLoss(is_expression=True)
-        self.cycle_loss = CausalCycleLoss()
+        self.cycle_loss = CausalCycleLoss(self.au_expression_support)
         
         # ---- Counterfactual mask thresholds (learnable) ----
         self.cf_threshold = nn.Parameter(torch.tensor(0.5))
         self.cf_threshold_exp = nn.Parameter(torch.tensor(0.5))
         
         # ---- Precompute text descriptions ----
-        self._text_descriptions = [AU_DESCRIPTIONS[au] for au in DISFA_AUS]
+        self._text_descriptions = [AU_DESCRIPTIONS[au] for au in self.au_ids]
         self._cached_text_emb = None
         
-        # 1-to-1 alignment matching SYM_EMOTIONS order
-        # ["Angry", "Fear", "Happy", "Sad", "Surprise", "Disgust", "Neutral"]
-        sym_to_key = {
-            "Angry": "anger", "Fear": "fear", "Happy": "happiness",
-            "Sad": "sadness", "Surprise": "surprise", "Disgust": "disgust",
-        }
-        neutral_desc = (
-            "A neutral facial expression with resting facial muscles, no eyebrow movement, "
-            "eyes naturally open, and relaxed lips with mouth closed."
-        )
-        self._emotion_text_descriptions = [
-            EMOTION_DESCRIPTIONS[sym_to_key[emo]] if emo in sym_to_key else neutral_desc
-            for emo in SYM_EMOTIONS
-        ]
+        self._emotion_text_descriptions = [CTRL_EMOTION_DESCRIPTIONS[emo] for emo in self.emotion_names]
         self._cached_emotion_text_emb = None
         
         # Initialize default phase freeze/unfreeze
@@ -293,7 +290,9 @@ class CtrlAUModel(nn.Module):
 
     def update_class_weights(self, weights: torch.Tensor):
         """Update AU class weights dynamically (e.g. for specific folds)."""
-        w = weights / weights.sum() * NUM_AUS
+        if weights.numel() != self.num_aus or torch.any(weights <= 0):
+            raise ValueError(f"expected {self.num_aus} positive AU class weights")
+        w = weights / weights.sum() * self.num_aus
         self.wal_weights.copy_(w)
         self.wal_loss.weight = self.wal_weights
 
@@ -315,19 +314,10 @@ class CtrlAUModel(nn.Module):
     
     def au_to_expr_pseudo(self, Y_a):
         """
-        MultiviewSymAU Eq. (1) & (2):
-        1. scores = Y_a @ M_AE
-        2. ke = argmax(scores)
-        3. neutral samples (sum(Y_a) == 0) -> class 6 (Neutral)
-        4. One-hot scatter
+        Implement SymGraphAU Eq. (1)-(2): select the highest-scoring
+        expression under the verified dataset prior and make it one-hot.
         """
-        scores = Y_a.float() @ self.M_AE  # (B, 7)
-        ke = scores.argmax(dim=1)         # (B,)
-        neutral_mask = (Y_a.float().sum(dim=1) == 0)
-        ke[neutral_mask] = 6              # Neutral index = 6
-        Y_e = torch.zeros(Y_a.size(0), self.num_emotions, device=Y_a.device)
-        Y_e.scatter_(1, ke.unsqueeze(1), 1.0)
-        return Y_e
+        return compute_expression_pseudo_labels(Y_a.float(), self.paper_au_expression_prior)
 
     def forward(self, images, au_labels=None, phase=None):
         """
@@ -359,20 +349,18 @@ class CtrlAUModel(nn.Module):
         feat = self.global_linear(feat)  # (B, 49, 512)
         
         # ============================================================
-        # 3. AU Head (8 branches -> V_a and p_a)
+        # 3. AU Head (dataset AU branches -> V_a and p_a)
         # ============================================================
         V_a, au_probs = self.au_head(feat)
-        # V_a: (B, 8, 256)
-        # au_probs: (B, 8)
+        # V_a: (B, N_AU, 256); au_probs: (B, N_AU)
         au_embeddings = [V_a[:, i, :] for i in range(self.num_aus)]
         au_logits = torch.logit(au_probs.clamp(1e-6, 1.0 - 1e-6))
         
         # ============================================================
-        # 4. Expression Head (7 branches -> V_e and p_e)
+        # 4. Expression Head (8 branches -> V_e and p_e)
         # ============================================================
         V_e, emotion_probs = self.emotion_head(feat)
-        # V_e: (B, 7, 256)
-        # emotion_probs: (B, 7)
+        # V_e: (B, 8, 256); emotion_probs: (B, 8)
         emotion_embed_list = [V_e[:, i, :] for i in range(self.num_emotions)]
         emotion_logits = torch.logit(emotion_probs.clamp(1e-6, 1.0 - 1e-6))
         
@@ -383,8 +371,8 @@ class CtrlAUModel(nn.Module):
         emotion_pseudo = None
         
         if au_labels is not None:
-            # Pseudo-label expression via M_AE dot product
-            emotion_pseudo = self.au_to_expr_pseudo(au_labels)  # (B, 7) one-hot
+            # One-hot expression target from SymGraphAU Eq. (1)-(2).
+            emotion_pseudo = self.au_to_expr_pseudo(au_labels)  # (B, 8)
             
             # (1) L_wa: Weighted Asymmetric Loss on AU probabilities (MultiviewSymAU Eq. 3)
             loss_wa = self.wal_loss(au_probs, au_labels.float())
@@ -396,9 +384,12 @@ class CtrlAUModel(nn.Module):
             losses["loss_we"] = loss_we
             losses["loss_emotion"] = loss_we
             
-            # (3) Joint Feature Learning (JFL) Phase 1 Base Loss: L_jf = L_wa + gamma * L_we
+            # (3) Joint Feature Learning (JFL) Phase 1 Base Loss.
+            # Keep both configured task weights active; lambda_au was
+            # previously ignored here.
+            lambda_au = getattr(self.cfg, "lambda_au", 1.0)
             gamma_emo = getattr(self.cfg, "lambda_emotion", 0.05)
-            loss_phase1 = loss_wa + gamma_emo * loss_we
+            loss_phase1 = lambda_au * loss_wa + gamma_emo * loss_we
             losses["loss_phase1"] = loss_phase1
             
             if phase == 1:
@@ -448,10 +439,6 @@ class CtrlAUModel(nn.Module):
                     loss_emo_contrastive = torch.tensor(0.0, device=device)
                 losses["loss_emo_contrastive"] = loss_emo_contrastive
                 
-                # 4. FACS AU Violation Loss (Noisy contradictory rules disabled for DISFA)
-                loss_facs_au = self.facs_au_violation_loss(au_probs)
-                losses["loss_facs_au"] = loss_facs_au
-                
                 # Total Combined Phase 1 Loss
                 cfg = self.cfg
                 total_loss = (
@@ -460,8 +447,7 @@ class CtrlAUModel(nn.Module):
                     cfg.lambda_align * l_align +
                     cfg.lambda_decorr * l_decorr +
                     cfg.lambda_contrastive * loss_contrastive +
-                    cfg.lambda_emo_contrastive * loss_emo_contrastive +
-                    cfg.lambda_facs_au * loss_facs_au
+                    cfg.lambda_emo_contrastive * loss_emo_contrastive
                 )
                 losses["total_loss"] = total_loss
         else:
@@ -493,15 +479,16 @@ class CtrlAUModel(nn.Module):
         
         # AU-AU graph: models cross-AU dependencies via feature-level residual
         updated_au, au_au_adj = self.graph_module.forward_au_au(au_emb_stacked)
-        au_au_logits = torch.cat([self.au_au_classifiers[i](updated_au[:, i, :]) for i in range(NUM_AUS)], dim=1)
+        au_au_logits = torch.cat([self.au_au_classifiers[i](updated_au[:, i, :]) for i in range(self.num_aus)], dim=1)
         au_au_probs = torch.sigmoid(au_au_logits)
         
-        # AU-Expression graph: Hierarchical cascade (takes updated_au from AU-AU graph)
+        # Strict one-way AU -> Expression graph.  The graph receives updated
+        # AU nodes from the AU-AU graph and cannot send messages back to them.
         updated_nodes, au_exp_adj = self.graph_module.forward_au_exp(updated_au, emotion_emb_stacked)
-        updated_au_final = updated_nodes[:, :NUM_AUS, :]
-        updated_emo_final = updated_nodes[:, NUM_AUS:, :]
+        updated_au_final = updated_nodes[:, :self.num_aus, :]
+        updated_emo_final = updated_nodes[:, self.num_aus:, :]
         
-        graph_au_logits = torch.cat([self.graph_au_classifiers[i](updated_au_final[:, i, :]) for i in range(NUM_AUS)], dim=1)
+        graph_au_logits = torch.cat([self.graph_au_classifiers[i](updated_au_final[:, i, :]) for i in range(self.num_aus)], dim=1)
         graph_au_probs = torch.sigmoid(graph_au_logits)
         
         graph_emo_logits = torch.cat([self.graph_emo_classifiers[i](updated_emo_final[:, i, :]) for i in range(self.num_emotions)], dim=1)
@@ -551,11 +538,11 @@ class CtrlAUModel(nn.Module):
             losses["loss_facs_au_au"] = loss_facs_au_au
             losses["loss_facs_graph_au"] = loss_facs_graph_au
             
-            # 6. FACS AU-Emotion Hypergraph Loss
-            loss_facs_exp = self.facs_emotion_violation_loss(
+            # 6. Verified AU-expression prior support loss
+            loss_au_expression_support = self.au_expression_support_loss(
                 graph_au_probs, graph_emo_probs
             )
-            losses["loss_facs_exp"] = loss_facs_exp
+            losses["loss_au_expression_support"] = loss_au_expression_support
             
             # 7. Hierarchical Counterfactual Intervention (4 Losses across Level 1 & Level 2)
             # Following Idea 1: Semantic Counterfactual Interventions via CLIP Subspace Nulling
@@ -563,13 +550,13 @@ class CtrlAUModel(nn.Module):
             alpha_cf = getattr(self.cfg, "cf_intervention_scale", 5.0)
             
             # Extract text embeddings and normalize for projection
-            text_emb_au = self._get_text_embeddings(device=device) # (NUM_AUS, D_text)
-            text_proj_au = self.text_proj(text_emb_au) # (NUM_AUS, D_vis)
+            text_emb_au = self._get_text_embeddings(device=device) # (N_AU, D_text)
+            text_proj_au = self.text_proj(text_emb_au) # (N_AU, D_vis)
             
             # Idea 1.1: Semantic Basis Orthogonalization (Gram-Schmidt)
             # This ensures that nulling one AU doesn't accidentally erase correlated AUs
             ortho_basis_list = []
-            for i in range(NUM_AUS):
+            for i in range(self.num_aus):
                 v_i = text_proj_au[i]
                 for u_j in ortho_basis_list:
                     # Project v_i onto u_j
@@ -579,42 +566,43 @@ class CtrlAUModel(nn.Module):
                 ortho_basis_list.append(u_i)
                 
             text_proj_norm = torch.stack(ortho_basis_list, dim=0)
-            text_proj_exp = text_proj_norm.view(1, 1, NUM_AUS, -1) # (1, 1, NUM_AUS, D_vis)
+            text_proj_exp = text_proj_norm.reshape(1, 1, self.num_aus, -1) # (1, 1, N_AU, D_vis)
             
             # =========================================================
             # LEVEL 1: AU-AU Graph Counterfactual Intervention (Losses 1 & 2)
             # Source: AU_i -> Target: AU_j
             # =========================================================
             # Soft Mask on AU-AU causal importance: Eq. 11
-            m_soft_au = torch.sigmoid(gamma_cf * (au_au_imp_mask - self.cf_threshold)) # (8, 8)
-            m_discrep_au = m_soft_au
-            m_consist_au = 1.0 - m_soft_au
+            m_soft_au = torch.sigmoid(gamma_cf * (au_au_imp_mask - self.cf_threshold)) # source -> target
+            # Counterfactual batches are indexed target first, source second.
+            m_discrep_au = m_soft_au.transpose(0, 1)
+            m_consist_au = 1.0 - m_discrep_au
             
-            au_expanded_1 = au_emb_stacked.unsqueeze(1)    # (B, 1, NUM_AUS, D)
-            m_discrep_exp_1 = m_discrep_au.unsqueeze(0).unsqueeze(-1) # (1, NUM_AUS, NUM_AUS, 1)
+            au_expanded_1 = au_emb_stacked.unsqueeze(1)    # (B, 1, N_AU, D)
+            m_discrep_exp_1 = m_discrep_au.unsqueeze(0).unsqueeze(-1) # (1, N_AU, N_AU, 1)
             m_consist_exp_1 = m_consist_au.unsqueeze(0).unsqueeze(-1)
             
             # Idea 1: Project visual onto text and subtract (directional anatomical erasure, scaled by alpha_cf)
             proj_1 = alpha_cf * (au_expanded_1 * text_proj_exp).sum(dim=-1, keepdim=True) * text_proj_exp
             
             # Perturb source AUs for each target AU j by erasing semantic features
-            au_imp_all_1 = (au_expanded_1 - proj_1 * m_discrep_exp_1).view(B * NUM_AUS, NUM_AUS, -1)
-            au_unimp_all_1 = (au_expanded_1 - proj_1 * m_consist_exp_1).view(B * NUM_AUS, NUM_AUS, -1)
+            au_imp_all_1 = (au_expanded_1 - proj_1 * m_discrep_exp_1).reshape(B * self.num_aus, self.num_aus, -1)
+            au_unimp_all_1 = (au_expanded_1 - proj_1 * m_consist_exp_1).reshape(B * self.num_aus, self.num_aus, -1)
             
             # Forward perturbed representations through AU-AU GAT
             up_nodes_imp_1, _ = self.graph_module.forward_au_au(au_imp_all_1)
             up_nodes_unimp_1, _ = self.graph_module.forward_au_au(au_unimp_all_1)
             
-            # Reshape to (B, NUM_AUS_target, NUM_AUS_nodes, D)
-            up_nodes_imp_1 = up_nodes_imp_1.view(B, NUM_AUS, NUM_AUS, -1)
-            up_nodes_unimp_1 = up_nodes_unimp_1.view(B, NUM_AUS, NUM_AUS, -1)
+            # Reshape to (B, target_AU, source/target_AU_nodes, D)
+            up_nodes_imp_1 = up_nodes_imp_1.reshape(B, self.num_aus, self.num_aus, -1)
+            up_nodes_unimp_1 = up_nodes_unimp_1.reshape(B, self.num_aus, self.num_aus, -1)
             
             # For each target AU j, extract node j's representation under perturbation
-            updated_au_imp_1 = torch.stack([up_nodes_imp_1[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, 8, D)
-            updated_au_unimp_1 = torch.stack([up_nodes_unimp_1[:, j, j, :] for j in range(NUM_AUS)], dim=1) # (B, 8, D)
+            updated_au_imp_1 = torch.stack([up_nodes_imp_1[:, j, j, :] for j in range(self.num_aus)], dim=1)
+            updated_au_unimp_1 = torch.stack([up_nodes_unimp_1[:, j, j, :] for j in range(self.num_aus)], dim=1)
             
-            probs_imp_1 = torch.sigmoid(torch.cat([self.au_au_classifiers[i](updated_au_imp_1[:, i, :]) for i in range(NUM_AUS)], dim=1))
-            probs_unimp_1 = torch.sigmoid(torch.cat([self.au_au_classifiers[i](updated_au_unimp_1[:, i, :]) for i in range(NUM_AUS)], dim=1))
+            probs_imp_1 = torch.sigmoid(torch.cat([self.au_au_classifiers[i](updated_au_imp_1[:, i, :]) for i in range(self.num_aus)], dim=1))
+            probs_unimp_1 = torch.sigmoid(torch.cat([self.au_au_classifiers[i](updated_au_unimp_1[:, i, :]) for i in range(self.num_aus)], dim=1))
             
             # Level 1 CF Losses: Feature Cosine + Logit MSE
             loss_cf_au_imp, loss_cf_au_unimp = self.cf_loss_au(
@@ -630,20 +618,21 @@ class CtrlAUModel(nn.Module):
             # LEVEL 2: AU-Expression Graph Counterfactual Intervention (Losses 3 & 4)
             # Source: AU_i -> Target: Expression_k
             # =========================================================
-            # Extract AU -> Expression submatrix from au_exp_imp_mask (7, 8)
-            au_exp_imp_sub = au_exp_imp_mask[NUM_AUS:, :NUM_AUS] # (7, 8)
-            m_soft_exp = torch.sigmoid(gamma_cf * (au_exp_imp_sub - self.cf_threshold_exp)) # (7, 8)
+            # Extract AU -> Expression edges (source AU, target emotion) and
+            # present them as target-emotion x source-AU masks.
+            au_exp_imp_sub = au_exp_imp_mask[:self.num_aus, self.num_aus:].transpose(0, 1)
+            m_soft_exp = torch.sigmoid(gamma_cf * (au_exp_imp_sub - self.cf_threshold_exp)) # (N_expression, N_AU)
             m_discrep_exp = m_soft_exp
             m_consist_exp = 1.0 - m_soft_exp
             
-            au_expanded_2 = updated_au.unsqueeze(1)    # (B, 1, NUM_AUS, D)
-            m_discrep_exp_2 = m_discrep_exp.unsqueeze(0).unsqueeze(-1) # (1, 7, 8, 1)
+            au_expanded_2 = updated_au.unsqueeze(1)    # (B, 1, N_AU, D)
+            m_discrep_exp_2 = m_discrep_exp.unsqueeze(0).unsqueeze(-1) # (1, N_expression, N_AU, 1)
             m_consist_exp_2 = m_consist_exp.unsqueeze(0).unsqueeze(-1)
             
             # Perturb source AUs for each target Emotion k by erasing semantic features (scaled by alpha_cf)
             proj_2 = alpha_cf * (au_expanded_2 * text_proj_exp).sum(dim=-1, keepdim=True) * text_proj_exp
-            au_imp_all_2 = (au_expanded_2 - proj_2 * m_discrep_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
-            au_unimp_all_2 = (au_expanded_2 - proj_2 * m_consist_exp_2).view(B * self.num_emotions, NUM_AUS, -1)
+            au_imp_all_2 = (au_expanded_2 - proj_2 * m_discrep_exp_2).reshape(B * self.num_emotions, self.num_aus, -1)
+            au_unimp_all_2 = (au_expanded_2 - proj_2 * m_consist_exp_2).reshape(B * self.num_emotions, self.num_aus, -1)
             
             emo_repeat_2 = emotion_emb_stacked.unsqueeze(1).expand(-1, self.num_emotions, -1, -1).reshape(B * self.num_emotions, self.num_emotions, -1)
             
@@ -651,12 +640,12 @@ class CtrlAUModel(nn.Module):
             up_nodes_imp_2, _ = self.graph_module.forward_au_exp(au_imp_all_2, emo_repeat_2)
             up_nodes_unimp_2, _ = self.graph_module.forward_au_exp(au_unimp_all_2, emo_repeat_2)
             
-            up_nodes_imp_2 = up_nodes_imp_2.view(B, self.num_emotions, NUM_AUS + self.num_emotions, -1)
-            up_nodes_unimp_2 = up_nodes_unimp_2.view(B, self.num_emotions, NUM_AUS + self.num_emotions, -1)
+            up_nodes_imp_2 = up_nodes_imp_2.reshape(B, self.num_emotions, self.num_aus + self.num_emotions, -1)
+            up_nodes_unimp_2 = up_nodes_unimp_2.reshape(B, self.num_emotions, self.num_aus + self.num_emotions, -1)
             
-            # For each target Emotion k, extract emotion node k's representation (index NUM_AUS + k)
-            updated_emo_imp_2 = torch.stack([up_nodes_imp_2[:, k, NUM_AUS + k, :] for k in range(self.num_emotions)], dim=1) # (B, 7, D)
-            updated_emo_unimp_2 = torch.stack([up_nodes_unimp_2[:, k, NUM_AUS + k, :] for k in range(self.num_emotions)], dim=1) # (B, 7, D)
+            # For each target expression k, extract expression node k.
+            updated_emo_imp_2 = torch.stack([up_nodes_imp_2[:, k, self.num_aus + k, :] for k in range(self.num_emotions)], dim=1)
+            updated_emo_unimp_2 = torch.stack([up_nodes_unimp_2[:, k, self.num_aus + k, :] for k in range(self.num_emotions)], dim=1)
             
             probs_imp_2 = torch.sigmoid(torch.cat([self.graph_emo_classifiers[k](updated_emo_imp_2[:, k, :]) for k in range(self.num_emotions)], dim=1))
             probs_unimp_2 = torch.sigmoid(torch.cat([self.graph_emo_classifiers[k](updated_emo_unimp_2[:, k, :]) for k in range(self.num_emotions)], dim=1))
@@ -683,10 +672,10 @@ class CtrlAUModel(nn.Module):
             
             # Phase 2 Total Loss: Pure Graph & Hierarchical Causal Reasoning (Eq. 16)
             cfg = self.cfg
-            w_cf_au_imp = getattr(cfg, "lambda_cf_au_imp", cfg.lambda_cf_important)
-            w_cf_au_unimp = getattr(cfg, "lambda_cf_au_unimp", cfg.lambda_cf_unimportant)
-            w_cf_exp_imp = getattr(cfg, "lambda_cf_exp_imp", cfg.lambda_cf_important)
-            w_cf_exp_unimp = getattr(cfg, "lambda_cf_exp_unimp", cfg.lambda_cf_unimportant)
+            w_cf_au_imp = cfg.lambda_cf_au_imp
+            w_cf_au_unimp = cfg.lambda_cf_au_unimp
+            w_cf_exp_imp = cfg.lambda_cf_exp_imp
+            w_cf_exp_unimp = cfg.lambda_cf_exp_unimp
             
             total_loss = (
                 cfg.lambda_au_au * loss_au_au +
@@ -696,7 +685,7 @@ class CtrlAUModel(nn.Module):
                 cfg.lambda_causal_au * loss_causal_au +
                 cfg.lambda_causal_exp * loss_causal_exp +
                 cfg.lambda_facs_au * loss_facs_au +
-                cfg.lambda_facs_exp * loss_facs_exp +
+                cfg.lambda_au_expression_prior * loss_au_expression_support +
                 cfg.lambda_cycle * loss_cycle +
                 w_cf_au_imp * loss_cf_au_imp +
                 w_cf_au_unimp * loss_cf_au_unimp +
@@ -723,7 +712,7 @@ class CtrlAUModel(nn.Module):
                     p_emo = torch.sigmoid(refined_emo_logits)
                     
                     e_au = self.facs_au_violation_loss(p_au)
-                    e_exp = self.facs_emotion_violation_loss(p_au, p_emo)
+                    e_exp = self.au_expression_support_loss(p_au, p_emo)
                     # Strong prior anchor (1.0) so visual evidence is not overridden by rule suppression
                     e_prior = F.mse_loss(refined_au_logits, graph_au_logits.detach()) + \
                               F.mse_loss(refined_emo_logits, graph_emo_logits.detach())

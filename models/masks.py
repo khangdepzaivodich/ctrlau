@@ -12,8 +12,8 @@ class MaskModule(nn.Module):
     """
     Generates importance masks and polarity masks from graph adjacency matrices.
     
-    - Importance mask: which edges/regions are important.
-      Computed by: sigmoid(adjacency) -> compare against learnable threshold -> hard mask
+    - Importance mask: which signed edges/regions are important.
+      Computed from absolute raw adjacency logits.
       (Uses straight-through estimator for differentiability)
     
     - Polarity mask: +1 (excitatory) or -1 (inhibitory) per edge.
@@ -25,8 +25,9 @@ class MaskModule(nn.Module):
         self.num_aus = num_aus
         self.num_emotions = num_emotions
         
-        # Learnable threshold for AU-AU graph (pre-sigmoid, initialized to 0.5)
-        self.au_au_threshold = nn.Parameter(torch.tensor(0.0))  # sigmoid(0) = 0.5
+        # Learnable thresholds stored as logits for checkpoint compatibility;
+        # edge magnitudes are normalized from raw signed logits below.
+        self.au_au_threshold = nn.Parameter(torch.tensor(0.0))
         
         # Learnable threshold for AU-Exp graph
         num_nodes_ae = num_aus + num_emotions
@@ -37,7 +38,7 @@ class MaskModule(nn.Module):
         Apply learnable threshold with straight-through estimator.
         
         Args:
-            magnitude: (N, N) edge magnitudes in [0, 1]
+            magnitude: (N, N) non-negative raw edge magnitudes
             threshold_param: scalar learnable threshold parameter
         Returns:
             hard_mask: (N, N) binary mask {0, 1} (differentiable via STE)
@@ -60,16 +61,14 @@ class MaskModule(nn.Module):
         Generate masks for AU-AU graph.
         
         Args:
-            au_au_adj: (N_AU, N_AU) sigmoid adjacency weights
+            au_au_adj: (N_AU, N_AU) signed source -> target logits
         Returns:
             importance_mask: (N_AU, N_AU) binary importance mask
             polarity_mask: (N_AU, N_AU) +1/-1 polarity mask
         """
-        importance_mask = self._threshold_mask(au_au_adj, self.au_au_threshold)
-        
-        # Polarity: sign of the raw adjacency (before sigmoid)
-        # Since we receive sigmoid(adj), we use: > 0.5 means positive, < 0.5 means negative
-        polarity_mask = torch.where(au_au_adj > 0.5,
+        magnitude = 1.0 - torch.exp(-au_au_adj.abs())
+        importance_mask = self._threshold_mask(magnitude, self.au_au_threshold)
+        polarity_mask = torch.where(au_au_adj >= 0.0,
                                      torch.ones_like(au_au_adj),
                                      -torch.ones_like(au_au_adj))
         
@@ -80,14 +79,14 @@ class MaskModule(nn.Module):
         Generate masks for AU-Expression graph.
         
         Args:
-            au_exp_adj: (N_nodes, N_nodes) sigmoid adjacency weights
+            au_exp_adj: (N_nodes, N_nodes) signed source -> target logits
         Returns:
             importance_mask: (N_nodes, N_nodes) binary importance mask
             polarity_mask: (N_nodes, N_nodes) +1/-1 polarity mask
         """
-        importance_mask = self._threshold_mask(au_exp_adj, self.au_exp_threshold)
-        
-        polarity_mask = torch.where(au_exp_adj > 0.5,
+        magnitude = 1.0 - torch.exp(-au_exp_adj.abs())
+        importance_mask = self._threshold_mask(magnitude, self.au_exp_threshold)
+        polarity_mask = torch.where(au_exp_adj >= 0.0,
                                      torch.ones_like(au_exp_adj),
                                      -torch.ones_like(au_exp_adj))
         

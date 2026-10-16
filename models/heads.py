@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import EMOTION_AU_RULES_IDX, EMOTIONS, NUM_EMOTIONS
+from config import CTRL_EMOTIONS, CTRL_NUM_EMOTIONS, DISFA_M_AE
 
 class Conv1DExtractor(nn.Module):
     """
@@ -96,7 +96,7 @@ class EmotionHead(nn.Module):
     Also has a learnable emotion embedding branch.
     """
     
-    def __init__(self, backbone_dim, num_emotions=NUM_EMOTIONS, emotion_embed_dim=256):
+    def __init__(self, backbone_dim, num_emotions=CTRL_NUM_EMOTIONS, emotion_embed_dim=256):
         super().__init__()
         self.num_emotions = num_emotions
         
@@ -131,21 +131,13 @@ class EmotionHead(nn.Module):
         device = au_probs.device
         emotion_pseudo = torch.zeros(B, self.num_emotions, device=device)
         
-        for emo_idx, emo_name in enumerate(EMOTIONS):
-            rule = EMOTION_AU_RULES_IDX[emo_name]
-            au_indices = rule["required_idx"]
-            
-            # Gather the relevant AU probabilities
-            relevant_probs = au_probs[:, au_indices]  # (B, K)
-            
-            if rule["operator"] == "AND":
-                # Product t-norm: multiply all probabilities
-                emo_score = relevant_probs.prod(dim=1)  # (B,)
-            else:  # "OR"
-                # Probabilistic co-norm: 1 - prod(1 - p_i)
-                emo_score = 1.0 - (1.0 - relevant_probs).prod(dim=1)
-            
-            emotion_pseudo[:, emo_idx] = emo_score
+        if au_probs.size(1) != DISFA_M_AE.size(0):
+            raise ValueError("EmotionHead's compatibility path expects the verified DISFA AU order")
+        prior = DISFA_M_AE.to(device=au_probs.device, dtype=au_probs.dtype)
+        scores = au_probs @ prior
+        labels = scores.argmax(dim=1)
+        labels[au_probs.sum(dim=1) == 0] = CTRL_NUM_EMOTIONS - 1
+        emotion_pseudo.scatter_(1, labels.unsqueeze(1), 1.0)
         
         return emotion_pseudo
     
