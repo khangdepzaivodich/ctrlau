@@ -90,6 +90,57 @@ def _find_dir_ci(parent, target_name):
     return os.path.join(parent, target_name)
 
 
+def _resolve_disfa_frame_paths(subject_image_dir, label_frames):
+    """Verify exact frame correspondence before accepting a numbering offset.
+
+    DISFA annotations are one-based. Extracted images may keep those IDs or
+    use zero-based IDs. Never infer the offset from an individual missing
+    file: compare the complete image and annotation frame sets instead.
+    """
+    if not os.path.isdir(subject_image_dir):
+        raise FileNotFoundError(f"DISFA subject image directory not found: {subject_image_dir}")
+    image_paths = {}
+    with os.scandir(subject_image_dir) as entries:
+        for entry in entries:
+            stem, extension = os.path.splitext(entry.name)
+            if not entry.is_file() or extension.lower() not in (".png", ".jpg", ".jpeg"):
+                continue
+            if not stem.isdecimal():
+                raise ValueError(f"DISFA raw images require numeric frame names: {entry.path}")
+            frame_id = int(stem)
+            if frame_id in image_paths:
+                raise ValueError(
+                    f"Ambiguous DISFA image frame {frame_id}: "
+                    f"{image_paths[frame_id]} and {entry.path}"
+                )
+            image_paths[frame_id] = entry.path
+
+    label_frames = set(label_frames)
+    if not label_frames:
+        raise ValueError(f"DISFA subject has no annotated frames: {subject_image_dir}")
+    image_frames = set(image_paths)
+    for offset in (0, -1):
+        expected_frames = {frame + offset for frame in label_frames}
+        if image_frames == expected_frames:
+            if offset:
+                print(
+                    f"[Dataset] Verified zero-based images in {subject_image_dir}: "
+                    f"{len(image_frames)} frames; annotation frame k -> image k-1."
+                )
+            return {frame: image_paths[frame + offset] for frame in label_frames}
+
+    missing_direct = sorted(label_frames - image_frames)
+    missing_zero_based = sorted({frame - 1 for frame in label_frames} - image_frames)
+    raise FileNotFoundError(
+        f"DISFA frame alignment failed in {subject_image_dir}: "
+        f"{len(label_frames)} annotated frames and {len(image_frames)} images. "
+        f"Neither exact one-based nor zero-based numbering matches the complete frame set. "
+        f"Missing image IDs (one-based): {missing_direct[:8]}; "
+        f"missing image IDs (zero-based): {missing_zero_based[:8]}. "
+        "Check for missing/extra images or incorrect extraction; no frames were skipped."
+    )
+
+
 class DISFADataset(Dataset):
     """
     DISFA dataset supporting both list-based and raw folder layouts.
@@ -221,8 +272,11 @@ class DISFADataset(Dataset):
 
                     if frame_nums is None:
                         frame_nums = set(au_labels[au].keys())
-                    else:
-                        frame_nums = frame_nums.intersection(au_labels[au].keys())
+                    elif frame_nums != set(au_labels[au]):
+                        raise ValueError(
+                            f"DISFA AU annotation frame sets disagree for {subj}, AU{au}: "
+                            f"{label_file}. Frame alignment cannot be verified."
+                        )
 
                 if frame_nums is None:
                     continue
@@ -231,11 +285,11 @@ class DISFADataset(Dataset):
                     if au in au_labels:
                         self.labels_cache[(subj, au)] = au_labels[au]
 
+                frame_paths = _resolve_disfa_frame_paths(
+                    os.path.join(self.img_root, subj), frame_nums
+                )
                 for fn in sorted(frame_nums):
-                    img_path = os.path.join(self.img_root, subj, f"{fn}.png")
-                    if not os.path.isfile(img_path):
-                        raise FileNotFoundError(f"DISFA frame listed but not found: {img_path}")
-                    self.samples.append((subj, fn, img_path))
+                    self.samples.append((subj, fn, frame_paths[fn]))
 
         # Diagnostic if 0 samples
         if len(self.samples) == 0:
