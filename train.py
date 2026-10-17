@@ -9,7 +9,7 @@ import os
 import random
 import argparse
 import warnings
-from math import cos, pi
+from math import cos, pi, isfinite
 import numpy as np
 import torch
 
@@ -23,6 +23,226 @@ from config import (
 )
 from dataset import DISFADataset, BP4DDataset
 from models.ctrlau import CtrlAUModel
+
+
+TRAINING_SCHEMA = "ctrlau_one_way_v2"
+
+
+def load_training_checkpoint(model, path, *, phase, fold, dataset, model_name,
+                             device, resume_phase=None):
+    """Validate the protocol and every tensor before changing model state.
+
+    Phase-1 checkpoints from the previous implementation remain compatible:
+    only the two obsolete, deterministic loss buffers are removed. No learned
+    tensor is fabricated or accepted as missing. Old graph-stage checkpoints
+    are rejected because their objectives and intervention semantics changed.
+    """
+    payload = torch.load(path, map_location=device, weights_only=True)
+    required = {"state_dict", "phase", "fold", "dataset", "au_ids", "model", "num_emotions", "epoch"}
+    if not isinstance(payload, dict) or not required.issubset(payload):
+        raise ValueError("Checkpoint must contain complete model, dataset, fold and phase metadata")
+    expected = {
+        "dataset": dataset, "fold": fold, "model": model_name,
+        "num_emotions": getattr(model, "num_emotions", None),
+    }
+    for name, value in expected.items():
+        if payload[name] != value:
+            raise ValueError(f"Checkpoint {name} mismatch: {payload[name]!r} != {value!r}")
+    if tuple(payload["au_ids"]) != get_dataset_aus(dataset):
+        raise ValueError("Checkpoint AU vocabulary/order mismatch")
+    source_phase = payload["phase"]
+    if source_phase not in (1, 2, 3, 4) or source_phase not in (phase, phase - 1):
+        raise ValueError(f"Cannot enter phase {phase} from phase {source_phase}")
+    if resume_phase is not None and source_phase != resume_phase:
+        raise ValueError("--resume_phase disagrees with checkpoint metadata")
+    if model_name == "ctrlau":
+        if payload.get("graph_topology") != "au_to_expression":
+            raise ValueError("Checkpoint does not use the strict AU->Expression topology")
+        if source_phase >= 2 and payload.get("training_schema") != TRAINING_SCHEMA:
+            raise ValueError("Old graph-stage objectives are incompatible; restart phase 2 from phase 1")
+    if source_phase == phase:
+        if not {"optimizer", "best_f1"}.issubset(payload):
+            raise ValueError("Same-phase resume requires optimizer and best_f1 metadata")
+        if not isinstance(payload["optimizer"], dict) or not {"state", "param_groups"}.issubset(payload["optimizer"]):
+            raise ValueError("Same-phase resume requires a complete optimizer state")
+        if not isfinite(payload["best_f1"]) or not 0.0 <= payload["best_f1"] <= 1.0:
+            raise ValueError("Checkpoint best_f1 must be in [0, 1]")
+    if not isinstance(payload["epoch"], int) or payload["epoch"] < 1:
+        raise ValueError("Checkpoint must contain a positive epoch")
+
+    cleaned = {}
+    for key, value in payload["state_dict"].items():
+        name = key.removeprefix("module.")
+        if model_name == "ctrlau":
+            name = name.removeprefix("stage1.")
+        if name in cleaned:
+            raise ValueError(f"Duplicate checkpoint tensor after prefix removal: {name}")
+        cleaned[name] = value
+    if model_name == "ctrlau" and source_phase == 1:
+        for name in ("cycle_loss.rule_matrix", "au_expression_support_loss.support_matrix"):
+            if name in cleaned:
+                value = cleaned.pop(name)
+                if not torch.equal(value.to(model.au_expression_support), model.au_expression_support):
+                    raise ValueError(f"Obsolete prior buffer does not match the selected dataset: {name}")
+    target = model.state_dict()
+    missing = sorted(set(target) - set(cleaned))
+    unexpected = sorted(set(cleaned) - set(target))
+    if missing or unexpected:
+        raise ValueError(f"Incomplete checkpoint: missing={missing}, unexpected={unexpected}")
+    for name, value in cleaned.items():
+        if not isinstance(value, torch.Tensor) or value.shape != target[name].shape:
+            raise ValueError(f"Checkpoint tensor shape/type mismatch: {name}")
+        if not torch.isfinite(value).all():
+            raise ValueError(f"Non-finite checkpoint tensor: {name}")
+    if model_name == "ctrlau":
+        if not torch.equal(cleaned["paper_au_expression_prior"].to(model.paper_au_expression_prior),
+                           model.paper_au_expression_prior):
+            raise ValueError("Checkpoint expression prior mismatch")
+        for name in ("wal_weights", "wal_loss.weight"):
+            if not torch.allclose(cleaned[name].to(model.wal_weights), model.wal_weights):
+                raise ValueError("Checkpoint class weights do not match the selected training split")
+    model.load_state_dict(cleaned, strict=True)
+    if model_name == "ctrlau" and source_phase == 1 and phase == 2:
+        model.init_graph_classifiers_from_base()
+    return payload
+
+
+def configure_training_phase(model, args):
+    """Apply the CLI's phase-specific freezing and objective weights."""
+    model.set_phase(args.phase)
+    if args.phase == 1:
+        print("=== Phase 1: Feature Extraction ===")
+        model.cfg.lambda_au = 1.0
+        model.cfg.lambda_emotion = 0.05
+        model.cfg.lambda_facs_au = 0.0
+        if args.model == "ctrlau":
+            print("CtrlAU Method: Phase 1 Feature Learning with Core Method Regularizers:")
+            print("  - HSIC Disentanglement (L_ib, L_align, L_decorr)")
+            print("  - CLIP Text-Visual Contrastive Alignment (AUs & Emotions on active y=1)")
+            print("  - FACS AU Rule: Removed (0.0) from Phase 1")
+            model.cfg.lambda_ib = 1e-2
+            model.cfg.lambda_align = 1e-2
+            model.cfg.lambda_decorr = 1e-2
+            model.cfg.lambda_contrastive = 0.05
+            model.cfg.lambda_emo_contrastive = 0.05
+        else:
+            print("Pure SymGraphAU: MultiviewSymAU Stage 1 Baseline (No Phase 1 regularizers)")
+            model.cfg.lambda_ib = 0.0
+            model.cfg.lambda_align = 0.0
+            model.cfg.lambda_decorr = 0.0
+            model.cfg.lambda_contrastive = 0.0
+            model.cfg.lambda_emo_contrastive = 0.0
+            model.cfg.lambda_facs_au = 0.0
+
+        model.cfg.lambda_dag = 0.0
+        model.cfg.lambda_causal_au = 0.0
+        model.cfg.lambda_causal_exp = 0.0
+        model.cfg.lambda_au_au = 0.0
+        model.cfg.lambda_graph_au = 0.0
+        model.cfg.lambda_graph_emo = 0.0
+
+    elif args.phase == 2:
+        print("=== Phase 2: Causal Graph Routing ===")
+        print("Freezing Backbone and Base Classifiers. Training only the Graph Routing Modules.")
+        if hasattr(model, "backbone"):
+            for param in model.backbone.parameters():
+                param.requires_grad = False
+        if hasattr(model, "global_linear"):
+            for param in model.global_linear.parameters():
+                param.requires_grad = False
+        if hasattr(model, "au_head"):
+            for param in model.au_head.parameters():
+                param.requires_grad = False
+        if hasattr(model, "emotion_head"):
+            for param in model.emotion_head.parameters():
+                param.requires_grad = False
+        if hasattr(model, "text_encoder"):
+            for param in model.text_encoder.parameters():
+                param.requires_grad = False
+        if hasattr(model, "visual_proj"):
+            for param in model.visual_proj.parameters():
+                param.requires_grad = False
+        if hasattr(model, "text_proj"):
+            for param in model.text_proj.parameters():
+                param.requires_grad = False
+        if hasattr(model, "emotion_visual_proj"):
+            for param in model.emotion_visual_proj.parameters():
+                param.requires_grad = False
+        if hasattr(model, "emotion_text_proj"):
+            for param in model.emotion_text_proj.parameters():
+                param.requires_grad = False
+
+        # Freeze base CNN classification losses, enable Graph losses ONLY
+        model.cfg.lambda_au = 0.0
+        model.cfg.lambda_emotion = 0.0
+        model.cfg.lambda_ib = 0.0
+        model.cfg.lambda_align = 0.0
+        model.cfg.lambda_decorr = 0.0
+        model.cfg.lambda_contrastive = 0.0
+        model.cfg.lambda_emo_contrastive = 0.0
+        model.cfg.lambda_facs_au = 0.05 if args.model == "ctrlau" else 0.0
+
+        # Enable supervised graph losses
+        model.cfg.lambda_au_au = 1.0
+        model.cfg.lambda_graph_au = 1.0
+        model.cfg.lambda_graph_emo = 1.0
+        model.cfg.lambda_dag = 0.1
+
+        # NO Counterfactual losses in Phase 2
+        model.cfg.lambda_causal_au = 0.0
+        model.cfg.lambda_causal_exp = 0.0
+        model.cfg.lambda_cf_au_imp = 0.0
+        model.cfg.lambda_cf_au_unimp = 0.0
+        model.cfg.lambda_cf_exp_imp = 0.0
+        model.cfg.lambda_cf_exp_unimp = 0.0
+
+    elif args.phase == 3:
+        print("=== Phase 3: Counterfactual Intervention ===")
+        print("Activating Counterfactual Pass and CF Losses on top of the Graph.")
+        # Exact same freezing logic as Phase 2: keep backbone, linear block, and heads frozen
+        modules_to_freeze = [
+            "backbone", "global_linear", "au_head", "emotion_head",
+            "text_encoder", "visual_proj", "text_proj",
+            "emotion_visual_proj", "emotion_text_proj"
+        ]
+        for mod_name in modules_to_freeze:
+            if hasattr(model, mod_name):
+                mod = getattr(model, mod_name)
+                if mod is not None:
+                    for param in mod.parameters():
+                        param.requires_grad = False
+
+        # Zero out base task losses like in Phase 2
+        model.cfg.lambda_au = 0.0
+        model.cfg.lambda_emotion = 0.0
+        model.cfg.lambda_ib = 0.0
+        model.cfg.lambda_align = 0.0
+        model.cfg.lambda_decorr = 0.0
+        model.cfg.lambda_contrastive = 0.0
+        model.cfg.lambda_emo_contrastive = 0.0
+        model.cfg.lambda_facs_au = 0.05 if args.model == "ctrlau" else 0.0
+
+        # Supervised graph losses remain active
+        model.cfg.lambda_au_au = 1.0
+        model.cfg.lambda_graph_au = 1.0
+        model.cfg.lambda_graph_emo = 1.0
+        model.cfg.lambda_dag = 0.1
+
+        # Balanced CF weights (0.05) so counterfactual regularization doesn't overpower task accuracy
+        model.cfg.lambda_causal_au = 0.05
+        model.cfg.lambda_causal_exp = 0.05
+        model.cfg.lambda_cf_au_imp = 0.05
+        model.cfg.lambda_cf_au_unimp = 0.05
+        model.cfg.lambda_cf_exp_imp = 0.05
+        model.cfg.lambda_cf_exp_unimp = 0.05
+
+    elif args.phase == 4:
+        print("=== Phase 4: End-to-End Refinement ===")
+        print("Unfreezing visual and graph modules; CLIP stays frozen.")
+        for param in model.parameters():
+            param.requires_grad = True
+        for param in model.text_encoder.parameters():
+            param.requires_grad = False # keep CLIP frozen
 
 
 def adjust_learning_rate(optimizer, epoch, epochs, init_lr, iteration, num_iter):
@@ -115,15 +335,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
                     msg += f", L_g_emo: {running_losses['loss_graph_emo'] / num_batches:.4f}"
                 if "loss_au_au" in running_losses:
                     msg += f", L_au_au: {running_losses['loss_au_au'] / num_batches:.4f}"
-                if "loss_cycle" in running_losses and running_losses['loss_cycle'] > 0:
-                    msg += f", L_cycle: {running_losses['loss_cycle'] / num_batches:.4f}"
                 if "loss_dag" in running_losses and running_losses['loss_dag'] > 0:
                     msg += f", L_dag: {running_losses['loss_dag'] / num_batches:.4f}"
                 if ("loss_causal_au" in running_losses and running_losses['loss_causal_au'] > 0) or ("loss_causal_exp" in running_losses and running_losses['loss_causal_exp'] > 0):
                     l_c = (running_losses.get('loss_causal_au', 0.0) + running_losses.get('loss_causal_exp', 0.0)) / num_batches
                     msg += f", L_causal: {l_c:.4f}"
-                if "loss_au_expression_support" in running_losses and running_losses['loss_au_expression_support'] > 0:
-                    msg += f", L_au_exp_prior: {running_losses['loss_au_expression_support'] / num_batches:.4f}"
                 if "loss_cf_au_imp" in running_losses and running_losses['loss_cf_au_imp'] > 0:
                     msg += f", CF_au: {running_losses['loss_cf_au_imp'] / num_batches:.4f}"
                 if "loss_cf_exp_imp" in running_losses and running_losses['loss_cf_exp_imp'] > 0:
@@ -213,7 +429,7 @@ def main():
         type=int,
         default=None,
         choices=[1, 2, 3, 4],
-        help="Phase that produced a legacy raw state-dict checkpoint (optional)",
+        help="Optional source-phase assertion; checkpoints must contain protocol metadata",
     )
     parser.add_argument(
         "--output_dir",
@@ -245,8 +461,8 @@ def main():
     parser.add_argument(
         "--lr", "-lr",
         type=float,
-        default=1e-4,
-        help="Learning rate (default: 1e-4 for Phase 1, as in ynhi's run.txt)",
+        default=None,
+        help="Learning rate (defaults: phases 1/2=1e-4, phase 3=2e-5, phase 4=1e-5)",
     )
     parser.add_argument(
         "-b", "--batch_size",
@@ -269,10 +485,18 @@ def main():
     parser.add_argument(
         "--cf-scale",
         type=float,
-        default=5.0,
-        help="Intervention strength factor alpha for counterfactual subspace erasure (default: 5.0)",
+        default=1.0,
+        help="Semantic component attenuation in [0, 1] (default: 1.0; no overshoot)",
     )
     args = parser.parse_args()
+    if args.lr is None:
+        args.lr = {1: 1e-4, 2: 1e-4, 3: 2e-5, 4: 1e-5}[args.phase]
+    if not isfinite(args.cf_scale) or not 0.0 <= args.cf_scale <= 1.0:
+        parser.error("--cf-scale must be in [0, 1]; larger values amplify instead of attenuating")
+    if args.phase >= 2 and not args.resume:
+        parser.error("Phases 2/3/4 require --resume from the preceding phase or the same phase")
+    if args.resume and not os.path.isfile(args.resume):
+        raise FileNotFoundError(f"Checkpoint not found: {args.resume}")
     if args.model == "symgraphau" and args.phase != 1:
         raise ValueError("The copied legacy SymGraphAU wrapper supports phase 1 only; use CtrlAU for graph phases")
     if args.model == "symgraphau" and args.dataset != "disfa":
@@ -383,221 +607,24 @@ def main():
         print(f"  AU{au_id:<2}: weight={computed_weights[au_idx].item():.4f} (occurrence: {rate_pct:.2f}%)")
     
     # ==========================================
-    # 3-Phase Training Logic
+    # Phase-specific objectives and freezing
     # ==========================================
-    if args.phase == 1:
-        print("=== Phase 1: Feature Extraction ===")
-        if args.model == "ctrlau":
-            print("CtrlAU Method: Phase 1 Feature Learning with Core Method Regularizers:")
-            print("  - HSIC Disentanglement (L_ib, L_align, L_decorr)")
-            print("  - CLIP Text-Visual Contrastive Alignment (AUs & Emotions on active y=1)")
-            print("  - FACS AU Rule: Removed (0.0) from Phase 1")
-            model.cfg.lambda_ib = 1e-2
-            model.cfg.lambda_align = 1e-2
-            model.cfg.lambda_decorr = 1e-2
-            model.cfg.lambda_contrastive = 0.05
-            model.cfg.lambda_emo_contrastive = 0.05
-        else:
-            print("Pure SymGraphAU: MultiviewSymAU Stage 1 Baseline (No Phase 1 regularizers)")
-            model.cfg.lambda_ib = 0.0
-            model.cfg.lambda_align = 0.0
-            model.cfg.lambda_decorr = 0.0
-            model.cfg.lambda_contrastive = 0.0
-            model.cfg.lambda_emo_contrastive = 0.0
-            model.cfg.lambda_facs_au = 0.0
+    configure_training_phase(model, args)
 
-        model.cfg.lambda_dag = 0.0
-        model.cfg.lambda_causal_au = 0.0
-        model.cfg.lambda_causal_exp = 0.0
-        model.cfg.lambda_au_expression_prior = 0.0
-        model.cfg.lambda_au_au = 0.0
-        model.cfg.lambda_graph_au = 0.0
-        model.cfg.lambda_graph_emo = 0.0
-        model.cfg.lambda_cycle = 0.0
-        
-    elif args.phase == 2:
-        print("=== Phase 2: Causal Graph Routing ===")
-        print("Freezing Backbone and Base Classifiers. Training only the Graph Routing Modules.")
-        if hasattr(model, "backbone"):
-            for param in model.backbone.parameters():
-                param.requires_grad = False
-        if hasattr(model, "global_linear"):
-            for param in model.global_linear.parameters():
-                param.requires_grad = False
-        if hasattr(model, "au_head"):
-            for param in model.au_head.parameters():
-                param.requires_grad = False
-        if hasattr(model, "emotion_head"):
-            for param in model.emotion_head.parameters():
-                param.requires_grad = False
-        if hasattr(model, "text_encoder"):
-            for param in model.text_encoder.parameters():
-                param.requires_grad = False
-        if hasattr(model, "visual_proj"):
-            for param in model.visual_proj.parameters():
-                param.requires_grad = False
-        if hasattr(model, "text_proj"):
-            for param in model.text_proj.parameters():
-                param.requires_grad = False
-        if hasattr(model, "emotion_visual_proj"):
-            for param in model.emotion_visual_proj.parameters():
-                param.requires_grad = False
-        if hasattr(model, "emotion_text_proj"):
-            for param in model.emotion_text_proj.parameters():
-                param.requires_grad = False
-            
-        # Freeze base CNN classification losses, enable Graph losses ONLY
-        model.cfg.lambda_au = 0.0
-        model.cfg.lambda_emotion = 0.0
-        model.cfg.lambda_ib = 0.0
-        model.cfg.lambda_align = 0.0
-        model.cfg.lambda_decorr = 0.0
-        model.cfg.lambda_contrastive = 0.0
-        model.cfg.lambda_emo_contrastive = 0.0
-        model.cfg.lambda_facs_au = 0.05 if args.model == "ctrlau" else 0.0
-        
-        # Enable Graph & Cycle weights
-        model.cfg.lambda_au_au = 1.0
-        model.cfg.lambda_graph_au = 1.0
-        model.cfg.lambda_graph_emo = 1.0
-        model.cfg.lambda_dag = 0.1
-        model.cfg.lambda_cycle = 0.02
-        
-        # NO Counterfactual losses in Phase 2
-        model.cfg.lambda_causal_au = 0.0
-        model.cfg.lambda_causal_exp = 0.0
-        model.cfg.lambda_au_expression_prior = 0.05 if args.model == "ctrlau" else 0.0
-        model.cfg.lambda_cf_au_imp = 0.0
-        model.cfg.lambda_cf_au_unimp = 0.0
-        model.cfg.lambda_cf_exp_imp = 0.0
-        model.cfg.lambda_cf_exp_unimp = 0.0
-        
-    elif args.phase == 3:
-        print("=== Phase 3: Counterfactual Intervention ===")
-        print("Activating Counterfactual Pass and CF Losses on top of the Graph.")
-        # Exact same freezing logic as Phase 2: keep backbone, linear block, and heads frozen
-        modules_to_freeze = [
-            "backbone", "global_linear", "au_head", "emotion_head",
-            "text_encoder", "visual_proj", "text_proj",
-            "emotion_visual_proj", "emotion_text_proj"
-        ]
-        for mod_name in modules_to_freeze:
-            if hasattr(model, mod_name):
-                mod = getattr(model, mod_name)
-                if mod is not None:
-                    for param in mod.parameters():
-                        param.requires_grad = False
-                
-        # Zero out base task losses like in Phase 2
-        model.cfg.lambda_au = 0.0
-        model.cfg.lambda_emotion = 0.0
-        model.cfg.lambda_ib = 0.0
-        model.cfg.lambda_align = 0.0
-        model.cfg.lambda_decorr = 0.0
-        model.cfg.lambda_contrastive = 0.0
-        model.cfg.lambda_emo_contrastive = 0.0
-        model.cfg.lambda_facs_au = 0.05 if args.model == "ctrlau" else 0.0
-        
-        # Graph & Cycle weights active (dominant task supervision)
-        model.cfg.lambda_au_au = 1.0
-        model.cfg.lambda_graph_au = 1.0
-        model.cfg.lambda_graph_emo = 1.0
-        model.cfg.lambda_dag = 0.1
-        model.cfg.lambda_cycle = 0.02
-        
-        # Balanced CF weights (0.05) so counterfactual regularization doesn't overpower task accuracy
-        model.cfg.lambda_causal_au = 0.05
-        model.cfg.lambda_causal_exp = 0.05
-        model.cfg.lambda_au_expression_prior = 0.05 if args.model == "ctrlau" else 0.0
-        model.cfg.lambda_cf_au_imp = 0.05
-        model.cfg.lambda_cf_au_unimp = 0.05
-        model.cfg.lambda_cf_exp_imp = 0.05
-        model.cfg.lambda_cf_exp_unimp = 0.05
-
-        # Lower fine-tuning learning rate for Phase 3 (if not user-specified)
-        if args.lr == 1e-4:
-            args.lr = 2e-5
-            print(f"Phase 3 fine-tuning: setting learning rate to {args.lr:.2e}")
-
-    elif args.phase == 4:
-        print("=== Phase 4: End-to-End Refinement ===")
-        print("Unfreezing everything. Setting low learning rate.")
-        for param in model.parameters():
-            param.requires_grad = True
-        for param in model.text_encoder.parameters():
-            param.requires_grad = False # keep CLIP frozen
-        args.lr = 1e-5
-        
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     
     resume_payload = None
     checkpoint_phase = None
     if args.resume:
-        if os.path.isfile(args.resume):
-            print(f"Loading checkpoint from: {args.resume}")
-            raw_ckpt = torch.load(args.resume, map_location=device)
-            ckpt = raw_ckpt
-            if isinstance(raw_ckpt, dict) and ("state_dict" in raw_ckpt or "model" in raw_ckpt):
-                resume_payload = raw_ckpt
-                checkpoint_phase = raw_ckpt.get("phase")
-                ckpt = raw_ckpt.get("state_dict", raw_ckpt.get("model"))
-
-            checkpoint_dataset = resume_payload.get("dataset") if resume_payload else None
-            checkpoint_aus = tuple(resume_payload.get("au_ids", ())) if resume_payload else ()
-            checkpoint_topology = resume_payload.get("graph_topology") if resume_payload else None
-            if args.model == "ctrlau" and checkpoint_topology != "au_to_expression":
-                raise ValueError(
-                    "Checkpoint does not use the current strict AU->Expression graph topology; "
-                    "start Phase 2/3 from a checkpoint produced after this architecture change."
-                )
-            if checkpoint_dataset is None or not checkpoint_aus:
-                if args.resume_phase is None:
-                    raise ValueError(
-                        "Checkpoint has no dataset/AU metadata. Pass --resume_phase explicitly "
-                        "for a legacy checkpoint; new checkpoints are self-describing."
-                    )
-            else:
-                if checkpoint_dataset != args.dataset or checkpoint_aus != au_ids:
-                    raise ValueError(
-                        f"Checkpoint protocol mismatch: checkpoint={checkpoint_dataset}/{checkpoint_aus}, "
-                        f"requested={args.dataset}/{au_ids}"
-                    )
-
-            # Standardize key names (remove 'module.' or 'stage1.' prefixes)
-            from collections import OrderedDict
-            cleaned_state = OrderedDict()
-            for k, v in ckpt.items():
-                new_k = k.replace("module.", "")
-                if new_k.startswith("stage1."):
-                    new_k = new_k.replace("stage1.", "")
-                cleaned_state[new_k] = v
-
-            missing, unexpected = model.load_state_dict(cleaned_state, strict=False)
-            print(f"Checkpoint loaded successfully (strict=False):")
-            print(f"  Matched keys: {len(cleaned_state) - len(unexpected)}")
-            print(f"  Missing keys (uninitialized in P1, e.g. Graph heads in Phase 2): {len(missing)}")
-            print(f"  Unexpected keys: {len(unexpected)}")
-            
-            # If starting Phase 2 from Phase 1 weights, copy calibrated classifiers into graph heads.
-            # New checkpoints carry phase metadata; --resume_phase handles old raw state dicts.
-            source_phase = checkpoint_phase if checkpoint_phase is not None else args.resume_phase
-            if args.phase >= 2 and args.model == "ctrlau" and source_phase == 1:
-                if hasattr(model, "init_graph_classifiers_from_base"):
-                    model.init_graph_classifiers_from_base()
-                    print("  [CtrlAU] Successfully initialized graph classifiers from trained Phase 1 AU/Emotion heads!")
-            elif args.phase >= 2 and args.model == "ctrlau" and checkpoint_phase is None and args.resume_phase is None:
-                print("  [CtrlAU] Legacy raw checkpoint: pass --resume_phase 1 when promoting Phase 1 weights.")
-        else:
-            print(f"Warning: Checkpoint file '{args.resume}' not found. Starting from scratch.")
-    else:
-        if args.phase in [2, 3, 4]:
-            print(f"\n" + "=" * 60)
-            print(f"[NOTE] Phase {args.phase} is a fine-tuning stage that requires prior weights!")
-            print(f"       You did NOT pass '--resume <path.pth>'.")
-            print(f"       If starting from Phase 2 weights, remember to pass:")
-            print(f"       --resume <checkpoint_from_phase2.pth>")
-            print("=" * 60 + "\n")
+        print(f"Loading checkpoint from: {args.resume}")
+        resume_payload = load_training_checkpoint(
+            model, args.resume, phase=args.phase, fold=args.fold,
+            dataset=args.dataset, model_name=args.model, device=device,
+            resume_phase=args.resume_phase,
+        )
+        checkpoint_phase = resume_payload["phase"]
+        print(f"Checkpoint loaded strictly: phase {checkpoint_phase}, fold {args.fold}")
 
     # Optimizer matching original SymGraphAU verbatim:
     # optim.AdamW(net.parameters(), betas=(0.9, 0.999), lr=conf.learning_rate, weight_decay=conf.weight_decay)
@@ -621,7 +648,7 @@ def main():
     # using adjust_learning_rate() (cosine annealing matching original repo)
     
     # Training loop
-    best_f1 = 0.0
+    best_f1 = resume_payload["best_f1"] if checkpoint_phase == args.phase else 0.0
     for epoch in range(start_epoch, cfg.num_epochs + 1):
         print(f"\n{'='*60}")
         print(f"Epoch {epoch}/{cfg.num_epochs}")
@@ -638,7 +665,12 @@ def main():
         if args.model == "ctrlau" and args.phase == 1:
             model.init_graph_classifiers_from_base()
 
+        improved = avg_f1 > best_f1
+        best_f1 = max(best_f1, avg_f1)
         checkpoint = {
+            "training_schema": TRAINING_SCHEMA,
+            "best_f1": best_f1,
+            "f1": avg_f1,
             "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "epoch": epoch,
@@ -658,8 +690,7 @@ def main():
         print(f"  -> Saved epoch checkpoint: {epoch_ckpt_path}")
 
         # Save best model
-        if avg_f1 > best_f1:
-            best_f1 = avg_f1
+        if improved:
             best_ckpt_path = os.path.join(
                 output_dir,
                 f"{args.model}_phase{args.phase}_fold{args.fold}_best.pth",

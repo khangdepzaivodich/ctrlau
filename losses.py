@@ -311,39 +311,6 @@ class ViolationLoss(nn.Module):
         return loss
 
 
-class AUExpressionSupportLoss(nn.Module):
-    """Penalize supported AUs that fail to support the matching expression.
-
-    ``support_matrix`` is the verified SymGraphAU relation mask with shape
-    ``(N_expression, N_AU)``.  This is a soft implication regularizer for the
-    CtrlAU graph; it is deliberately separate from Phase 1 and is not a claim
-    that a FACS rule can uniquely identify an expression.
-    """
-    def __init__(self, support_matrix):
-        super().__init__()
-        support_matrix = torch.as_tensor(support_matrix, dtype=torch.float32)
-        if support_matrix.dim() != 2:
-            raise ValueError("support_matrix must have shape (N_expression, N_AU)")
-        if support_matrix.sum() <= 0:
-            raise ValueError("support_matrix must contain at least one verified AU-expression relation")
-        self.register_buffer("support_matrix", support_matrix)
-
-    def forward(self, au_probs, emotion_probs):
-        if au_probs.dim() != 2 or emotion_probs.dim() != 2:
-            raise ValueError("AU and expression probabilities must be rank-2 tensors")
-        if au_probs.size(1) != self.support_matrix.size(1):
-            raise ValueError("AU probability dimension does not match support_matrix")
-        if emotion_probs.size(1) != self.support_matrix.size(0):
-            raise ValueError("expression probability dimension does not match support_matrix")
-        violations = (
-            au_probs.unsqueeze(1)
-            * (1.0 - emotion_probs.unsqueeze(-1))
-        )
-        return (violations * self.support_matrix.unsqueeze(0)).sum() / (
-            au_probs.size(0) * self.support_matrix.sum()
-        )
-
-
 # ============================================================
 # Counterfactual Intervention Losses
 # ============================================================
@@ -597,62 +564,4 @@ class ExpressionBCELoss(nn.Module):
         loss = los_pos + los_neg
         loss = loss.mean(dim=-1)
         return -loss.mean()
-
-
-# ============================================================
-# Causal Cycle Consistency Loss (Idea 4)
-# ============================================================
-
-class CausalCycleLoss(nn.Module):
-    """
-    Idea 4: Cross-Task Bidirectional Causal Cycle Consistency.
-    Projects predicted expressions back to expected AU activations via the
-    canonical expression-to-AU support matrix.
-    Adds a top-down cycle loss to ensure the hierarchical predictions are consistent.
-    """
-    def __init__(self, rule_matrix):
-        super().__init__()
-        rule_matrix = torch.as_tensor(rule_matrix, dtype=torch.float32)
-        if rule_matrix.dim() != 2:
-            raise ValueError("rule_matrix must have shape (N_expression, N_AU)")
-        self.register_buffer("rule_matrix", rule_matrix)
-
-    def forward(self, emotion_probs, au_probs):
-        """
-        Args:
-            emotion_probs: (B, N_EMO)
-            au_probs: (B, N_AU)
-        """
-        if emotion_probs.size(1) != self.rule_matrix.size(0):
-            raise ValueError("emotion probability dimension does not match rule_matrix")
-        if au_probs.size(1) != self.rule_matrix.size(1):
-            raise ValueError("AU probability dimension does not match rule_matrix")
-        # rule_matrix is (N_EMO, N_AU), where a positive value means the
-        # expression has a verified primary or secondary AU relation.
-        # To project from Emotion down to AU, we say an AU is expected to be active
-        # if ANY of the active emotions require it.
-        # Probabilistic OR: P(A U B) = 1 - (1 - P(A))(1 - P(B))
-        # Expected AU prob: 1 - \prod_e (1 - M_AE[e, a] * P_e)
-        
-        # Expand dims for broadcasting
-        # emotion_probs: (B, N_EMO, 1)
-        e_probs = emotion_probs.unsqueeze(-1)
-        # rule_matrix: (1, N_EMO, N_AU)
-        m_ae = self.rule_matrix.unsqueeze(0)
-        
-        # Effective prob contribution from each emotion to each AU
-        effective_p = e_probs * m_ae  # (B, N_EMO, N_AU)
-        
-        # Prob of AU NOT being activated by each emotion
-        not_active_p = 1.0 - effective_p  # (B, N_EMO, N_AU)
-        
-        # Prob of AU NOT being activated by ANY emotion
-        not_active_any_p = not_active_p.prod(dim=1)  # (B, N_AU)
-        
-        # Expected AU prob
-        expected_au_probs = 1.0 - not_active_any_p  # (B, N_AU)
-        
-        # Cycle Consistency Loss: force predicted AUs to match Expected AUs
-        # We use MSE
-        return F.mse_loss(au_probs, expected_au_probs)
 

@@ -207,10 +207,9 @@ class ModelConfig:
     # Learnable threshold
     threshold_init = 0.5           # initial sigmoid pre-activation for mask threshold
     
-    # Counterfactual perturbation (CausalAffect Eq. 11-15)
-    noise_std = 0.1                # Gaussian noise std for perturbation
+    # Continuous counterfactual masks and raw-space semantic attenuation
     cf_gamma = 5.0                 # Sharpness factor for soft mask sigmoid
-    cf_intervention_scale = 5.0    # Scale factor alpha for counterfactual subspace erasure (Option A)
+    cf_intervention_scale = 1.0    # Bounded semantic component attenuation, in [0, 1]
     
     
     # Loss weights: Feature Extraction & Regularizers (Phase 1, 2, 3)
@@ -222,7 +221,6 @@ class ModelConfig:
     lambda_contrastive = 0.05      # Text-visual contrastive loss for AUs (masked to y=1)
     lambda_emo_contrastive = 0.05  # Text-visual contrastive loss for Emotions (masked to y=1)
     lambda_facs_au = 0.1           # FACS anatomical rules on AU probabilities (AU26 -> AU25, etc.)
-    lambda_cycle = 0.1             # Cross-Task Bidirectional Causal Cycle Consistency (Idea 4)
     
     # Loss weights: Graph, Causal DAG & Counterfactual Reasoning (Phase 2 & 3)
     lambda_au_au = 1.0             # Intermediate AU-AU graph classification loss
@@ -231,7 +229,6 @@ class ModelConfig:
     lambda_dag = 0.1               # DAG constraint on AU-AU adjacency matrix
     lambda_causal_au = 0.1         # Causal structural rule on AU-AU graph
     lambda_causal_exp = 0.1        # Causal structural rule on AU-Exp graph
-    lambda_au_expression_prior = 0.1  # Verified AU-expression support regularizer (Phase 2/3)
     # Counterfactual Intervention Weights (Level 1: AU-AU, Level 2: AU-Exp)
     lambda_cf_au_imp = 0.1         # Level 1 AU-AU causal discrepancy
     lambda_cf_au_unimp = 0.1       # Level 1 AU-AU non-causal consistency
