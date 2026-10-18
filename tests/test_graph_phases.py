@@ -12,8 +12,8 @@ from torch import nn
 from config import ModelConfig, get_dataset_aus, get_dataset_au_expression_prior
 from models.ctrlau import CtrlAUModel
 from train import (
-    TRAINING_SCHEMA, configure_training_phase, keep_frozen_modules_eval,
-    load_training_checkpoint, main,
+    TRAINING_SCHEMA, CF_MASK_SCHEMA, configure_training_phase, keep_frozen_modules_eval,
+    load_training_checkpoint, main, train_one_epoch,
 )
 
 
@@ -159,19 +159,86 @@ class GraphPhaseTests(unittest.TestCase):
     def test_continuous_masks_and_disabled_phase3_skip(self):
         model = make_model(3)
         with torch.no_grad():
-            model.graph_module.au_au_adj[0, 1] = .1
-            model.graph_module.au_au_adj[1, 0] = .2
+            model.graph_module.au_au_adj.fill_(.01)
+            model.graph_module.au_au_adj[1, 0] = .012
         x = torch.randn(2, 4, 32)
         y = torch.randint(0, 2, (2, 8)).float()
         with patch.object(model, "_intervene", wraps=model._intervene) as intervene:
             model(x, au_labels=y)
         mask = intervene.call_args_list[0].args[2]
-        self.assertNotEqual(mask[0, 1].item(), mask[1, 0].item())
+        self.assertNotEqual(mask[0, 0, 0].item(), mask[0, 0, 1].item())
         for key in ("lambda_cf_au_imp", "lambda_cf_au_unimp", "lambda_cf_exp_imp", "lambda_cf_exp_unimp"):
             setattr(model.cfg, key, 0.)
         with patch.object(model, "_semantic_components", side_effect=AssertionError("disabled CF executed")):
             out = model(x, au_labels=y)
         self.assertNotIn("loss_cf_important", out["losses"])
+
+    def test_relative_routing_masks_are_scale_invariant_and_handle_absent_edges(self):
+        # Small magnitudes reproduce the measured scale, not the user's
+        # unavailable trained graph. Incoming rows deliberately vary in scale.
+        routing = torch.tensor([[[.001, .002, .004, .009], [.008, .016, .032, .072]]])
+        threshold = torch.tensor(torch.log(torch.expm1(torch.tensor(1.))).item(), requires_grad=True)
+        mask = CtrlAUModel._routing_mask(routing, threshold, 5.)
+        torch.testing.assert_close(mask[:, 0], mask[:, 1])
+        torch.testing.assert_close(mask, CtrlAUModel._routing_mask(routing * 100, threshold, 5.))
+        self.assertLess(mask.min().item(), .1)
+        self.assertGreater(mask.max().item(), .9)
+        # No global-axis transposition or per-batch mixing.
+        batched = torch.cat([routing, routing.flip(-1)], dim=0)
+        result = CtrlAUModel._routing_mask(batched, threshold, 5.)
+        torch.testing.assert_close(result[0], mask[0])
+        torch.testing.assert_close(result[1], mask[0].flip(-1))
+        uniform = CtrlAUModel._routing_mask(torch.ones(2, 3, 8), threshold, 5.)
+        torch.testing.assert_close(uniform, torch.full_like(uniform, .5))
+        absent = CtrlAUModel._routing_mask(torch.zeros(2, 3, 8), threshold, 5.)
+        self.assertTrue(torch.isfinite(absent).all())
+        self.assertEqual(torch.count_nonzero(absent).item(), 0)
+        mask.mean().backward()
+        self.assertGreater(threshold.grad.abs().item(), 0)
+
+    def test_optional_factual_routing_does_not_change_graph_outputs(self):
+        for dataset in ("disfa", "bp4d"):
+            with self.subTest(dataset=dataset):
+                model = make_model(2, dataset)
+                graph = model.graph_module
+                au = torch.randn(2, model.num_aus, 256)
+                expr = torch.randn(2, 8, 256)
+                normal, adj = graph.forward_au_au(au)
+                observed, adj2, routing = graph.forward_au_au(au, return_routing=True)
+                torch.testing.assert_close(normal, observed, rtol=0, atol=0)
+                torch.testing.assert_close(adj, adj2, rtol=0, atol=0)
+                torch.testing.assert_close(routing.sum(-1), torch.ones_like(routing.sum(-1)), atol=1e-5, rtol=0)
+                normal, adj = graph.forward_au_exp(au, expr)
+                observed, adj2, routing = graph.forward_au_exp(au, expr, return_routing=True)
+                torch.testing.assert_close(normal, observed, rtol=0, atol=0)
+                torch.testing.assert_close(adj, adj2, rtol=0, atol=0)
+                self.assertEqual(torch.count_nonzero(routing[:, :model.num_aus]).item(), 0)
+                self.assertEqual(torch.count_nonzero(routing[:, :, model.num_aus:]).item(), 0)
+
+    def test_calibration_increases_measured_intervention_effect_without_changing_objective(self):
+        model = make_model(3)
+        model.train()
+        keep_frozen_modules_eval(model)
+        x = torch.randn(2, 4, 32)
+        y = torch.randint(0, 2, (2, 8)).float()
+        # Exact previous mask rule, evaluated on the same model and features.
+        def old_masks(routing, threshold, gamma):
+            adjacency = model.graph_module.au_au_adj if threshold is model.cf_threshold else model.graph_module.au_to_expr_adj
+            masks = torch.sigmoid(gamma * (adjacency.tanh().abs() - torch.sigmoid(threshold)))
+            return masks.t().unsqueeze(0).expand(routing.size(0), -1, -1)
+        with patch.object(model, "_routing_mask", side_effect=old_masks):
+            old = model(x, au_labels=y)
+        new = model(x, au_labels=y)
+        for name in ("graph_au_probs", "graph_emo_probs"):
+            torch.testing.assert_close(old[name], new[name], rtol=0, atol=0)
+        for prefix in ("au", "exp"):
+            before = old["cf_diagnostics"]
+            after = new["cf_diagnostics"]
+            self.assertGreater(after[f"cf_{prefix}_mask_std"].item(), before[f"cf_{prefix}_mask_std"].item())
+            self.assertGreater(after[f"cf_{prefix}_removed_imp"].item(), before[f"cf_{prefix}_removed_imp"].item())
+            self.assertGreater(after[f"cf_{prefix}_prob_mse_imp"].item(), before[f"cf_{prefix}_prob_mse_imp"].item())
+            self.assertFalse(any(v.requires_grad for v in after.values()))
+        self.assertGreater(new["cf_diagnostics"]["cf_au_feature_change_imp"].item(), old["cf_diagnostics"]["cf_au_feature_change_imp"].item())
 
     def test_checkpoint_promotion_and_rejection(self):
         model = make_model(2)
@@ -222,12 +289,24 @@ class GraphPhaseTests(unittest.TestCase):
             load(stage2, phase=3)
         stage2["training_schema"] = TRAINING_SCHEMA
         load(stage2, phase=3)
+        self.assertAlmostEqual(torch.nn.functional.softplus(model.cf_threshold).item(), 1., places=6)
+        for key, value in stage2["state_dict"].items():
+            if key not in ("cf_threshold", "cf_threshold_exp"):
+                torch.testing.assert_close(model.state_dict()[key], value, rtol=0, atol=0)
         with self.assertRaisesRegex(ValueError, "best_f1"):
             load(stage2)
         optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad])
         stage2.update(best_f1=.6513, optimizer=optimizer.state_dict())
         restored = load(stage2)
         self.assertEqual(restored["best_f1"], .6513)
+        stage3 = copy.deepcopy(stage2)
+        stage3["phase"] = 3
+        with self.assertRaisesRegex(ValueError, "mask calibration"):
+            load(stage3, phase=3)
+        stage3["cf_mask_schema"] = CF_MASK_SCHEMA
+        stage3["state_dict"]["cf_threshold"] = torch.tensor(-.75)
+        load(stage3, phase=3)
+        self.assertEqual(model.cf_threshold.item(), -.75)
 
     def test_cli_rejects_missing_checkpoint_and_overshoot_before_dataset_loading(self):
         for argv in (["train.py", "--phase", "2"], ["train.py", "--cf-scale", "5"]):
@@ -235,6 +314,19 @@ class GraphPhaseTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as exc:
                     main()
             self.assertEqual(exc.exception.code, 2)
+
+    def test_training_reports_cf_effects_and_cf_only_gradients(self):
+        model = make_model(3)
+        optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=2e-5)
+        batches = [{"image": torch.randn(2, 4, 32), "au_labels": torch.randint(0, 2, (2, 8)).float()}]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            stats = train_one_epoch(model, batches, optimizer, "cpu", 1, cfg=model.cfg, init_lr=2e-5)
+        self.assertIn("CF-only threshold |grad|", output.getvalue())
+        self.assertIn("cf_exp_prob_mse_imp", output.getvalue())
+        self.assertGreater(stats["cf_au_mask_std"], .1)
+        self.assertGreater(stats["cf_exp_mask_std"], .1)
+        self.assertTrue(all(torch.isfinite(torch.tensor(value)) for value in stats.values()))
 
 
 if __name__ == "__main__":

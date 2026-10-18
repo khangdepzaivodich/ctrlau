@@ -187,9 +187,12 @@ class CtrlAUModel(nn.Module):
         self.cf_loss_au = CounterfactualLoss(is_expression=False)
         self.cf_loss_exp = CounterfactualLoss(is_expression=True)
         
-        # ---- Counterfactual mask threshold logits (sigmoid bounds them) ----
-        self.cf_threshold = nn.Parameter(torch.tensor(float(cfg.threshold_init)))
-        self.cf_threshold_exp = nn.Parameter(torch.tensor(float(cfg.threshold_init)))
+        # Phases 1/2 retain the legacy, unused scalar values for compatibility.
+        # For CF training softplus(threshold) is a positive relative cutoff;
+        # inverse-softplus(1) starts at each target's mean incoming strength.
+        cf_init = math.log(math.expm1(1.0)) if self.phase >= 3 else float(cfg.threshold_init)
+        self.cf_threshold = nn.Parameter(torch.tensor(cf_init))
+        self.cf_threshold_exp = nn.Parameter(torch.tensor(cf_init))
         
         # ---- Precompute text descriptions ----
         self._text_descriptions = [AU_DESCRIPTIONS[au] for au in self.au_ids]
@@ -219,6 +222,8 @@ class CtrlAUModel(nn.Module):
         """Configure trainable modules for phases 1 through 4."""
         if phase not in (1, 2, 3, 4):
             raise ValueError(f"Unsupported phase: {phase}")
+        if self.phase < 3 and phase >= 3:
+            self.initialize_counterfactual_thresholds()
         self.phase = phase
         self.cfg.phase = phase
         if phase == 1:
@@ -319,6 +324,49 @@ class CtrlAUModel(nn.Module):
         """
         return compute_expression_pseudo_labels(Y_a.float(), self.paper_au_expression_prior)
 
+    @torch.no_grad()
+    def initialize_counterfactual_thresholds(self):
+        """Start CF cutoffs at one times the factual per-target routing mean.
+
+        No graph/classifier weights change. Call only when entering phase 3
+        from phase 2, never when resuming a calibrated phase-3 checkpoint.
+        """
+        initial = math.log(math.expm1(1.0))
+        self.cf_threshold.fill_(initial)
+        self.cf_threshold_exp.fill_(initial)
+
+    @staticmethod
+    def _routing_mask(routing, threshold, gamma):
+        """Relative incoming routing heuristic, in batch x target x source order.
+
+        Factual normalized routing is averaged across graph layers. Dividing
+        by its per-target mean removes the irrelevant raw-adjacency scale and
+        puts DISFA and BP4D on the same relative scale. A cutoff of one means
+        above-average incoming strength, not a claim of identified causality.
+        Equal strengths remain ambiguous; absent edges get no important mass.
+        """
+        strength = routing.abs()
+        mean = strength.mean(dim=-1, keepdim=True)
+        relative = strength / mean.clamp_min(torch.finfo(strength.dtype).tiny)
+        mask = torch.sigmoid(gamma * (relative - F.softplus(threshold)))
+        return torch.where(strength > 0, mask, torch.zeros_like(mask))
+
+    @staticmethod
+    def _cf_diagnostics(prefix, features, components, masks, strength,
+                        original_features, changed_features, original_probs, changed_probs):
+        """Detached measurements, excluded from the training objective."""
+        with torch.no_grad():
+            relative_component = components.norm(dim=-1) / features.norm(dim=-1).clamp_min(1e-8)
+            removed = strength * relative_component.unsqueeze(1) * masks
+            return {
+                f"cf_{prefix}_mask_mean": masks.mean().detach(),
+                f"cf_{prefix}_mask_std": masks.std(unbiased=False).detach(),
+                f"cf_{prefix}_removed_imp": removed.mean().detach(),
+                f"cf_{prefix}_removed_unimp": (strength * relative_component.unsqueeze(1) * (1 - masks)).mean().detach(),
+                f"cf_{prefix}_feature_change_imp": (1 - F.cosine_similarity(original_features, changed_features, dim=-1)).clamp_min(0).mean().detach(),
+                f"cf_{prefix}_prob_mse_imp": F.mse_loss(changed_probs, original_probs).detach(),
+            }
+
     def _semantic_components(self, features, text_directions):
         """Pull projected text scores back into raw AU feature coordinates.
 
@@ -347,9 +395,13 @@ class CtrlAUModel(nn.Module):
         """Attenuate raw-space components for each target x source mask."""
         if not 0.0 <= float(strength) <= 1.0:
             raise ValueError("cf_intervention_scale must be in [0, 1]; values above 1 overshoot")
+        if masks.dim() == 2:
+            masks = masks.unsqueeze(0)
+        if masks.dim() != 3 or masks.size(0) not in (1, features.size(0)) or masks.size(-1) != features.size(1):
+            raise ValueError("Masks must have shape (target, source) or (batch, target, source)")
         return (
             features.unsqueeze(1)
-            - float(strength) * components.unsqueeze(1) * masks.unsqueeze(0).unsqueeze(-1)
+            - float(strength) * components.unsqueeze(1) * masks.unsqueeze(-1)
         )
 
     def forward(self, images, au_labels=None, phase=None):
@@ -512,15 +564,33 @@ class CtrlAUModel(nn.Module):
         # ============================================================
         au_emb_stacked = torch.stack(au_embeddings, dim=1)           # (B, N_AU, D)
         emotion_emb_stacked = torch.stack(emotion_embed_list, dim=1) # (B, N_EMO, D)
+        cf_weights = (
+            self.cfg.lambda_cf_au_imp, self.cfg.lambda_cf_au_unimp,
+            self.cfg.lambda_cf_exp_imp, self.cfg.lambda_cf_exp_unimp,
+        )
+        if any(not math.isfinite(w) or w < 0 for w in cf_weights):
+            raise ValueError("Counterfactual loss weights must be non-negative")
+        run_cf = au_labels is not None and phase >= 3 and any(w > 0 for w in cf_weights)
+        cf_diagnostics = {}
         
         # AU-AU graph: models cross-AU dependencies via feature-level residual
-        updated_au, au_au_adj = self.graph_module.forward_au_au(au_emb_stacked)
+        if run_cf:
+            updated_au, au_au_adj, au_routing = self.graph_module.forward_au_au(
+                au_emb_stacked, return_routing=True
+            )
+        else:
+            updated_au, au_au_adj = self.graph_module.forward_au_au(au_emb_stacked)
         au_au_logits = torch.cat([self.au_au_classifiers[i](updated_au[:, i, :]) for i in range(self.num_aus)], dim=1)
         au_au_probs = torch.sigmoid(au_au_logits)
         
         # Strict one-way AU -> Expression graph.  The graph receives updated
         # AU nodes from the AU-AU graph and cannot send messages back to them.
-        updated_nodes, au_exp_adj = self.graph_module.forward_au_exp(updated_au, emotion_emb_stacked)
+        if run_cf:
+            updated_nodes, au_exp_adj, expression_routing = self.graph_module.forward_au_exp(
+                updated_au, emotion_emb_stacked, return_routing=True
+            )
+        else:
+            updated_nodes, au_exp_adj = self.graph_module.forward_au_exp(updated_au, emotion_emb_stacked)
         updated_au_final = updated_nodes[:, :self.num_aus, :]
         updated_emo_final = updated_nodes[:, self.num_aus:, :]
         
@@ -574,13 +644,6 @@ class CtrlAUModel(nn.Module):
             losses["loss_facs_au_au"] = loss_facs_au_au
             losses["loss_facs_graph_au"] = loss_facs_graph_au
             
-            cf_weights = (
-                self.cfg.lambda_cf_au_imp, self.cfg.lambda_cf_au_unimp,
-                self.cfg.lambda_cf_exp_imp, self.cfg.lambda_cf_exp_unimp,
-            )
-            if any(not math.isfinite(w) or w < 0 for w in cf_weights):
-                raise ValueError("Counterfactual loss weights must be non-negative")
-            run_cf = phase >= 3 and any(w > 0 for w in cf_weights)
             if run_cf:
                 # 7. Hierarchical Counterfactual Intervention (4 Losses across Level 1 & Level 2)
                 # Raw-space component attenuation along pulled-back CLIP score directions
@@ -599,12 +662,8 @@ class CtrlAUModel(nn.Module):
                 # LEVEL 1: AU-AU Graph Counterfactual Intervention (Losses 1 & 2)
                 # Source: AU_i -> Target: AU_j
                 # =========================================================
-                # Soft Mask on AU-AU causal importance: Eq. 11
-                m_soft_au = torch.sigmoid(
-                    gamma_cf * (torch.tanh(au_au_adj).abs() - torch.sigmoid(self.cf_threshold))
-                )  # continuous source -> target strengths
-                # Counterfactual batches are indexed target first, source second.
-                m_discrep_au = m_soft_au.transpose(0, 1)
+                # Actual factual routing is already receiver/target first.
+                m_discrep_au = self._routing_mask(au_routing, self.cf_threshold, gamma_cf)
                 m_consist_au = 1.0 - m_discrep_au
 
                 au_imp_all_1 = self._intervene(
@@ -638,19 +697,22 @@ class CtrlAUModel(nn.Module):
                 )
                 losses["loss_cf_au_imp"] = loss_cf_au_imp
                 losses["loss_cf_au_unimp"] = loss_cf_au_unimp
+                cf_diagnostics.update(self._cf_diagnostics(
+                    "au", au_emb_stacked, components_1, m_discrep_au, alpha_cf,
+                    updated_au.detach(), updated_au_imp_1,
+                    au_au_probs.detach(), probs_imp_1,
+                ))
 
                 # =========================================================
                 # LEVEL 2: AU-Expression Graph Counterfactual Intervention (Losses 3 & 4)
                 # Source: AU_i -> Target: Expression_k
                 # =========================================================
-                # Extract AU -> Expression edges (source AU, target emotion) and
-                # present them as target-emotion x source-AU masks.
-                au_exp_strength = torch.tanh(au_exp_adj[:self.num_aus, self.num_aus:]).abs().transpose(0, 1)
-                m_soft_exp = torch.sigmoid(
-                    gamma_cf * (au_exp_strength - torch.sigmoid(self.cf_threshold_exp))
-                )  # (N_expression, N_AU), without hard-mask quantization
-                m_discrep_exp = m_soft_exp
-                m_consist_exp = 1.0 - m_soft_exp
+                # Expression receivers, AU sources; no reverse or E->E block.
+                m_discrep_exp = self._routing_mask(
+                    expression_routing[:, self.num_aus:, :self.num_aus],
+                    self.cf_threshold_exp, gamma_cf,
+                )
+                m_consist_exp = 1.0 - m_discrep_exp
 
                 components_2 = self._semantic_components(updated_au, text_directions)
                 au_imp_all_2 = self._intervene(
@@ -685,6 +747,11 @@ class CtrlAUModel(nn.Module):
                 )
                 losses["loss_cf_exp_imp"] = loss_cf_exp_imp
                 losses["loss_cf_exp_unimp"] = loss_cf_exp_unimp
+                cf_diagnostics.update(self._cf_diagnostics(
+                    "exp", updated_au, components_2, m_discrep_exp, alpha_cf,
+                    updated_emo_final.detach(), updated_emo_imp_2,
+                    graph_emo_probs.detach(), probs_imp_2,
+                ))
 
                 # Combined / Global Counterfactual Losses
                 loss_cf_imp = 0.5 * (loss_cf_au_imp + loss_cf_exp_imp)
@@ -765,5 +832,6 @@ class CtrlAUModel(nn.Module):
             "au_exp_importance_mask": au_exp_imp_mask,
             "au_exp_polarity_mask": au_exp_pol_mask,
             "z_img": z_img,
+            "cf_diagnostics": cf_diagnostics,
             "losses": losses,
         }

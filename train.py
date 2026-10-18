@@ -26,6 +26,7 @@ from models.ctrlau import CtrlAUModel
 
 
 TRAINING_SCHEMA = "ctrlau_one_way_v2"
+CF_MASK_SCHEMA = "incoming_relative_v1"
 
 
 def load_training_checkpoint(model, path, *, phase, fold, dataset, model_name,
@@ -60,6 +61,8 @@ def load_training_checkpoint(model, path, *, phase, fold, dataset, model_name,
             raise ValueError("Checkpoint does not use the strict AU->Expression topology")
         if source_phase >= 2 and payload.get("training_schema") != TRAINING_SCHEMA:
             raise ValueError("Old graph-stage objectives are incompatible; restart phase 2 from phase 1")
+        if source_phase >= 3 and payload.get("cf_mask_schema") != CF_MASK_SCHEMA:
+            raise ValueError("Old phase-3 mask calibration is incompatible; restart phase 3 from phase 2")
     if source_phase == phase:
         if not {"optimizer", "best_f1"}.issubset(payload):
             raise ValueError("Same-phase resume requires optimizer and best_f1 metadata")
@@ -104,6 +107,9 @@ def load_training_checkpoint(model, path, *, phase, fold, dataset, model_name,
     model.load_state_dict(cleaned, strict=True)
     if model_name == "ctrlau" and source_phase == 1 and phase == 2:
         model.init_graph_classifiers_from_base()
+    if model_name == "ctrlau" and source_phase == 2 and phase == 3:
+        model.initialize_counterfactual_thresholds()
+        print("CF masks initialized: cutoff = each target's mean incoming routing strength")
     return payload
 
 
@@ -292,6 +298,19 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
         outputs = model(images, au_labels=au_labels)
         losses = outputs["losses"]
         total_loss = losses["total_loss"]
+
+        # Probe CF-only gradient signals once per epoch, without changing .grad
+        # or the optimizer. Total backward below still runs exactly once.
+        if batch_idx == 0 and "loss_cf_au_imp" in losses:
+            au_grad = torch.autograd.grad(
+                losses["loss_cf_au_imp"], model.cf_threshold, retain_graph=True
+            )[0]
+            exp_grad = torch.autograd.grad(
+                losses["loss_cf_exp_imp"], model.cf_threshold_exp, retain_graph=True
+            )[0]
+            print(f"  CF-only threshold |grad|: AU={au_grad.abs().item():.3e}, Expr={exp_grad.abs().item():.3e}")
+            for name, value in outputs["cf_diagnostics"].items():
+                print(f"  {name}: {value.item():.6e}")
         
         # Backward (no gradient clipping, matching original repo)
         optimizer.zero_grad()
@@ -303,6 +322,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
             if k not in running_losses:
                 running_losses[k] = 0.0
             running_losses[k] += v.item()
+        if "cf_diagnostics" in outputs:
+            for k, v in outputs["cf_diagnostics"].items():
+                if k not in running_losses:
+                    running_losses[k] = 0.0
+                running_losses[k] += v.item()
         num_batches += 1
         
         if (batch_idx + 1) % 50 == 0:
@@ -328,7 +352,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
                 if "loss_facs_au" in running_losses and running_losses['loss_facs_au'] > 0:
                     msg += f", L_facs: {running_losses['loss_facs_au'] / num_batches:.4f}"
             else:
-                # Phase 2 & 3: Graph, Relational, Cycle & Counterfactual Losses
+                # Phase 2 & 3: Graph, relational and counterfactual losses
                 if "loss_graph_au" in running_losses:
                     msg += f", L_g_au: {running_losses['loss_graph_au'] / num_batches:.4f}"
                 if "loss_graph_emo" in running_losses:
@@ -341,18 +365,26 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_
                     l_c = (running_losses.get('loss_causal_au', 0.0) + running_losses.get('loss_causal_exp', 0.0)) / num_batches
                     msg += f", L_causal: {l_c:.4f}"
                 if "loss_cf_au_imp" in running_losses and running_losses['loss_cf_au_imp'] > 0:
-                    msg += f", CF_au: {running_losses['loss_cf_au_imp'] / num_batches:.4f}"
+                    msg += f", CF_au: {running_losses['loss_cf_au_imp'] / num_batches:.6f}"
                 if "loss_cf_exp_imp" in running_losses and running_losses['loss_cf_exp_imp'] > 0:
-                    msg += f", CF_exp: {running_losses['loss_cf_exp_imp'] / num_batches:.4f}"
+                    msg += f", CF_exp: {running_losses['loss_cf_exp_imp'] / num_batches:.6f}"
                 if "loss_cf_au_unimp" in running_losses and running_losses['loss_cf_au_unimp'] > 0:
                     cf_unimp = (running_losses['loss_cf_au_unimp'] + running_losses.get('loss_cf_exp_unimp', 0.0)) / (2 * num_batches)
                     msg += f", CF_unimp: {cf_unimp:.4f}"
+                if "cf_au_mask_mean" in running_losses:
+                    msg += f", Mask_AU: {running_losses['cf_au_mask_mean'] / num_batches:.3f}"
+                    msg += f", Mask_E: {running_losses['cf_exp_mask_mean'] / num_batches:.3f}"
+                    msg += f", dP_AU: {running_losses['cf_au_prob_mse_imp'] / num_batches:.2e}"
+                    msg += f", dP_E: {running_losses['cf_exp_prob_mse_imp'] / num_batches:.2e}"
             print(msg)
     
     # Print epoch summary
     print(f"\n--- Epoch {epoch} Summary ---")
     for k, v in sorted(running_losses.items()):
-        print(f"  {k}: {v / num_batches:.4f}")
+        if k.startswith("cf_"):
+            print(f"  {k}: {v / num_batches:.6e}")
+        else:
+            print(f"  {k}: {v / num_batches:.4f}")
     print()
     
     return {k: v / num_batches for k, v in running_losses.items()}
@@ -669,6 +701,7 @@ def main():
         best_f1 = max(best_f1, avg_f1)
         checkpoint = {
             "training_schema": TRAINING_SCHEMA,
+            "cf_mask_schema": CF_MASK_SCHEMA if args.phase >= 3 else None,
             "best_f1": best_f1,
             "f1": avg_f1,
             "state_dict": model.state_dict(),

@@ -21,11 +21,13 @@ class DenseDynamicGraphConv(nn.Module):
         self.out_proj = nn.Linear(out_dim, out_dim)
         self.residual_proj = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
         
-    def forward(self, x, global_adj_logits):
+    def forward(self, x, global_adj_logits, return_routing=False):
         """
         Args:
             x: (B, N, D) node features
             global_adj_logits: (N, N) learned global adjacency logits
+            return_routing: also return the signed receiver-first weights
+                actually used for message passing, without changing outputs
         Returns:
             out: (B, N, D) updated node features
         """
@@ -52,6 +54,9 @@ class DenseDynamicGraphConv(nn.Module):
         # 4. Message Passing with Residual Connection
         out = torch.matmul(combined_adj, V)  # (B, N, D')
         out = self.residual_proj(x) + F.elu(self.out_proj(out))
+        if return_routing:
+            # Receiver-first weights actually used by this factual pass.
+            return out, combined_adj
         return out
 
 
@@ -125,30 +130,41 @@ class AUGraphModule(nn.Module):
         bottom = torch.cat([zero_expr_au, zero_expr_expr], dim=1)
         return torch.cat([top, bottom], dim=0)
     
-    def forward_au_au(self, au_embeddings_stacked):
+    def forward_au_au(self, au_embeddings_stacked, return_routing=False):
         """
         Forward pass for AU-AU graph.
         
         Args:
             au_embeddings_stacked: (B, N_AU, D) stacked AU embeddings
+            return_routing: additionally return (B, target, source) absolute
+                factual routing, averaged across layers, for CF masks
         Returns:
             x: (B, N_AU, D) updated AU embeddings after graph reasoning
             au_au_adj_logits: (N_AU, N_AU) signed source -> target logits
         """
         x = au_embeddings_stacked
+        routing = []
         for layer in self.au_au_layers:
-            x = layer(x, self.au_au_adj)
+            if return_routing:
+                x, weights = layer(x, self.au_au_adj, return_routing=True)
+                routing.append(weights.abs())
+            else:
+                x = layer(x, self.au_au_adj)
             
         x = au_embeddings_stacked + self.au_au_proj(x)
+        if return_routing:
+            return x, self.au_au_adj, torch.stack(routing).mean(dim=0)
         return x, self.au_au_adj
     
-    def forward_au_exp(self, au_embeddings_stacked, emotion_embeddings_stacked):
+    def forward_au_exp(self, au_embeddings_stacked, emotion_embeddings_stacked, return_routing=False):
         """
         Forward pass for AU-Expression graph.
         
         Args:
             au_embeddings_stacked: (B, N_AU, D) AU embeddings
             emotion_embeddings_stacked: (B, N_EMO, D) emotion embeddings
+            return_routing: additionally return absolute factual routing in
+                (B, receiver, sender) order, averaged across layers
         Returns:
             x: (B, N_AU + N_EMO, D) updated node embeddings
             au_exp_adj_logits: (N_AU + N_EMO, N_AU + N_EMO) signed source -> target logits
@@ -157,8 +173,15 @@ class AUGraphModule(nn.Module):
         node_features = torch.cat([au_embeddings_stacked, emotion_embeddings_stacked], dim=1)
         au_exp_adj = self._build_au_to_expr_adjacency()
         x = node_features
+        routing = []
         for layer in self.au_exp_layers:
-            x = layer(x, au_exp_adj)
+            if return_routing:
+                x, weights = layer(x, au_exp_adj, return_routing=True)
+                routing.append(weights.abs())
+            else:
+                x = layer(x, au_exp_adj)
             
         x = node_features + self.au_exp_proj(x)
+        if return_routing:
+            return x, au_exp_adj, torch.stack(routing).mean(dim=0)
         return x, au_exp_adj
