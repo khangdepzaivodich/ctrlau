@@ -1,7 +1,7 @@
 """
 CtrlAU: Full Model Architecture.
 Integrates MultiviewSymAU Stage 1 Backbone (ResNet-50 + LinearBlock + SymAUHead + SymExprHead + M_AE matrix)
-with CtrlAU Relational & Causal Regularizations in Phase 1, Phase 2, and Phase 3.
+with CtrlAU Relational & Causal Regularizations and end-to-end fine-tuning.
 """
 import torch
 import torch.nn as nn
@@ -56,7 +56,7 @@ class CtrlAUModel(nn.Module):
     - No counterfactual passes
     
     Phase 3: Counterfactual training with the visual model frozen
-    Phase 4: Optional end-to-end refinement
+    Phase 4: End-to-end fine-tuning with the phase-3 objective and fixed semantic anchors
     """
     
     def __init__(self, cfg=None):
@@ -287,11 +287,20 @@ class CtrlAUModel(nn.Module):
             for param in self.graph_emo_classifiers.parameters():
                 param.requires_grad = True
         elif phase == 4:
-            # Phase 4: End-to-end fine tuning
+            # Backpropagate graph/CF losses through the visual feature path.
             for param in self.parameters():
                 param.requires_grad = True
-            for param in self.text_encoder.parameters():
-                param.requires_grad = False
+            # Semantic directions are intentionally detached in CF training;
+            # keep their trained coordinate system fixed, as in phase 3.
+            # Base classifiers also have no role in the graph-stage objective.
+            frozen_modules = (
+                self.text_encoder, self.visual_proj, self.text_proj,
+                self.emotion_visual_proj, self.emotion_text_proj,
+                self.au_head.classifiers, self.emotion_head.classifiers,
+            )
+            for module in frozen_modules:
+                for param in module.parameters():
+                    param.requires_grad = False
 
     def update_class_weights(self, weights: torch.Tensor):
         """Update AU class weights dynamically (e.g. for specific folds)."""

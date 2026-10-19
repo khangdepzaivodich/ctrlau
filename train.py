@@ -202,23 +202,18 @@ def configure_training_phase(model, args):
         model.cfg.lambda_cf_exp_imp = 0.0
         model.cfg.lambda_cf_exp_unimp = 0.0
 
-    elif args.phase == 3:
-        print("=== Phase 3: Counterfactual Intervention ===")
-        print("Activating Counterfactual Pass and CF Losses on top of the Graph.")
-        # Exact same freezing logic as Phase 2: keep backbone, linear block, and heads frozen
-        modules_to_freeze = [
-            "backbone", "global_linear", "au_head", "emotion_head",
-            "text_encoder", "visual_proj", "text_proj",
-            "emotion_visual_proj", "emotion_text_proj"
-        ]
-        for mod_name in modules_to_freeze:
-            if hasattr(model, mod_name):
-                mod = getattr(model, mod_name)
-                if mod is not None:
-                    for param in mod.parameters():
-                        param.requires_grad = False
+    elif args.phase in (3, 4):
+        if args.phase == 3:
+            print("=== Phase 3: Counterfactual Intervention ===")
+            print("Activating Counterfactual Pass and CF Losses on top of the Graph.")
+        else:
+            print("=== Phase 4: End-to-End Fine-Tuning ===")
+            print("Training visual feature extractors and graphs with the phase-3 objective.")
+            print("CLIP, semantic projections and phase-1-only classifiers stay frozen.")
 
-        # Zero out base task losses like in Phase 2
+        # The objective is identical in phases 3/4; set_phase controls which
+        # modules train. Never inherit different weights from config defaults
+        # or from a previously configured phase in the same process.
         model.cfg.lambda_au = 0.0
         model.cfg.lambda_emotion = 0.0
         model.cfg.lambda_ib = 0.0
@@ -242,14 +237,6 @@ def configure_training_phase(model, args):
         model.cfg.lambda_cf_exp_imp = 0.05
         model.cfg.lambda_cf_exp_unimp = 0.05
 
-    elif args.phase == 4:
-        print("=== Phase 4: End-to-End Refinement ===")
-        print("Unfreezing visual and graph modules; CLIP stays frozen.")
-        for param in model.parameters():
-            param.requires_grad = True
-        for param in model.text_encoder.parameters():
-            param.requires_grad = False # keep CLIP frozen
-
 
 def adjust_learning_rate(optimizer, epoch, epochs, init_lr, iteration, num_iter):
     """Per-batch cosine annealing LR schedule matching MultiviewSymAU utils.py verbatim."""
@@ -261,19 +248,34 @@ def adjust_learning_rate(optimizer, epoch, epochs, init_lr, iteration, num_iter)
 
 
 def keep_frozen_modules_eval(model):
-    """Prevent frozen BatchNorm buffers from drifting during graph phases."""
-    if getattr(model, "phase", None) not in (2, 3):
+    """Keep frozen graph-stage modules deterministic without freezing phase-4 features."""
+    phase = getattr(model, "phase", None)
+    if phase not in (2, 3, 4):
         return
 
     frozen_modules = [
-        "backbone", "global_linear", "au_head", "emotion_head",
         "text_encoder", "visual_proj", "text_proj",
         "emotion_visual_proj", "emotion_text_proj",
     ]
+    if phase in (2, 3):
+        frozen_modules += ["backbone", "global_linear", "au_head", "emotion_head"]
     for module_name in frozen_modules:
         module = getattr(model, module_name, None)
         if module is not None:
             module.eval()
+
+
+def build_optimizer(model, lr, weight_decay):
+    # Preserve phase-4 optimizer ordering for existing checkpoints. AdamW
+    # skips frozen parameters (grad=None), so retaining them does not update
+    # the semantic anchors or the phase-1-only classifier weights.
+    parameters = [
+        p for name, p in model.named_parameters()
+        if p.requires_grad or (
+            getattr(model, "phase", None) == 4 and not name.startswith("text_encoder.")
+        )
+    ]
+    return torch.optim.AdamW(parameters, lr=lr, betas=(0.9, 0.999), weight_decay=weight_decay)
 
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, cfg=None, init_lr=1e-4):
@@ -660,12 +662,7 @@ def main():
 
     # Optimizer matching original SymGraphAU verbatim:
     # optim.AdamW(net.parameters(), betas=(0.9, 0.999), lr=conf.learning_rate, weight_decay=conf.weight_decay)
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=args.lr,
-        betas=(0.9, 0.999),
-        weight_decay=cfg.weight_decay,
-    )
+    optimizer = build_optimizer(model, lr=args.lr, weight_decay=cfg.weight_decay)
     print(f"Initial learning rate: {args.lr:.2e}")
 
     start_epoch = 1

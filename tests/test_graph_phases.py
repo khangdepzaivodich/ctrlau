@@ -13,7 +13,7 @@ from config import ModelConfig, get_dataset_aus, get_dataset_au_expression_prior
 from models.ctrlau import CtrlAUModel
 from train import (
     TRAINING_SCHEMA, CF_MASK_SCHEMA, configure_training_phase, keep_frozen_modules_eval,
-    load_training_checkpoint, main, train_one_epoch,
+    build_optimizer, load_training_checkpoint, main, train_one_epoch,
 )
 
 
@@ -109,6 +109,126 @@ class GraphPhaseTests(unittest.TestCase):
         self.assertFalse(any("facs" in k or "cf_" in k for k in out["losses"]))
         with self.assertRaises(ValueError):
             model.set_phase(5)
+
+    def test_phase4_preserves_phase3_objective_from_fresh_or_existing_config(self):
+        phase3 = make_model(3)
+        expected = {
+            name: getattr(phase3.cfg, name)
+            for name in vars(ModelConfig) if name.startswith("lambda_")
+        }
+        fresh = make_model(4)
+        for model in (fresh, phase3):
+            with contextlib.redirect_stdout(io.StringIO()):
+                configure_training_phase(model, types.SimpleNamespace(phase=4, model="ctrlau"))
+            self.assertEqual(model.phase, 4)
+            for name, weight in expected.items():
+                self.assertEqual(getattr(model.cfg, name), weight, name)
+
+    def test_phase4_end_to_end_gradients_and_fixed_semantic_anchors(self):
+        for dataset in ("disfa", "bp4d"):
+            with self.subTest(dataset=dataset):
+                model = make_model(4, dataset)
+                # Trainable offline boundary in place of pretrained ResNet;
+                # all downstream feature, graph and CF computations are real.
+                model.backbone = nn.Linear(32, 32)
+                model.train()
+                keep_frozen_modules_eval(model)
+                for name in ("text_encoder", "visual_proj", "text_proj",
+                             "emotion_visual_proj", "emotion_text_proj"):
+                    module = getattr(model, name)
+                    self.assertFalse(module.training, name)
+                    self.assertTrue(all(not p.requires_grad for p in module.parameters()), name)
+                for head in (model.au_head, model.emotion_head):
+                    self.assertTrue(head.training)
+                    self.assertTrue(all(p.requires_grad for p in head.extractors.parameters()))
+                    self.assertTrue(all(not p.requires_grad for p in head.classifiers.parameters()))
+                frozen = {k: p.detach().clone() for k, p in model.named_parameters() if not p.requires_grad}
+                bn_before = model.au_head.extractors[0].bn1.num_batches_tracked.clone()
+                x = torch.randn(2, 4, 32)
+                y = torch.randint(0, 2, (2, model.num_aus)).float()
+                with patch.object(model.graph_module, "forward_au_au", wraps=model.graph_module.forward_au_au) as aa, patch.object(
+                    model.graph_module, "forward_au_exp", wraps=model.graph_module.forward_au_exp
+                ) as ae:
+                    out = model(x, au_labels=y)
+                self.assertEqual((aa.call_count, ae.call_count), (3, 3))
+                cf_names = ("loss_cf_au_imp", "loss_cf_au_unimp", "loss_cf_exp_imp", "loss_cf_exp_unimp")
+                cf_loss = sum(out["losses"][name] for name in cf_names)
+                active = {
+                    "backbone": model.backbone.weight,
+                    "shared": model.global_linear.fc.weight,
+                    "AU extractor": model.au_head.extractors[0].conv1.weight,
+                    "expression extractor": model.emotion_head.extractors[0].conv1.weight,
+                    "AU graph": model.graph_module.au_au_adj,
+                    "expression graph": model.graph_module.au_to_expr_adj,
+                    "AU cutoff": model.cf_threshold,
+                    "expression cutoff": model.cf_threshold_exp,
+                }
+                for (name, _), grad in zip(active.items(), torch.autograd.grad(
+                    cf_loss, tuple(active.values()), retain_graph=True
+                )):
+                    self.assertTrue(torch.isfinite(grad).all(), name)
+                    self.assertGreater(grad.abs().sum().item(), 0, name)
+                optimizer = build_optimizer(model, lr=1e-5, weight_decay=model.cfg.weight_decay)
+                before = model.backbone.weight.detach().clone()
+                out["losses"]["total_loss"].backward()
+                for name, p in model.named_parameters():
+                    if name in frozen:
+                        self.assertIsNone(p.grad, name)
+                    elif p.grad is not None:
+                        self.assertTrue(torch.isfinite(p.grad).all(), name)
+                optimizer.step()
+                self.assertFalse(torch.equal(model.backbone.weight, before))
+                self.assertGreater(model.au_head.extractors[0].bn1.num_batches_tracked.item(), bn_before.item())
+                for name, p in model.named_parameters():
+                    if name in frozen:
+                        torch.testing.assert_close(p, frozen[name], rtol=0, atol=0)
+
+    def test_phase4_optimizer_accepts_legacy_parameter_order(self):
+        model = make_model(4)
+        legacy_parameters = [p for name, p in model.named_parameters() if not name.startswith("text_encoder.")]
+        legacy = torch.optim.AdamW(legacy_parameters, lr=1e-5, weight_decay=model.cfg.weight_decay)
+        adjacency = model.graph_module.au_au_adj
+        adjacency.grad = torch.ones_like(adjacency)
+        legacy.step()
+        legacy.zero_grad(set_to_none=True)
+        optimizer = build_optimizer(model, lr=1e-5, weight_decay=model.cfg.weight_decay)
+        optimizer.load_state_dict(legacy.state_dict())
+        self.assertEqual([id(p) for p in optimizer.param_groups[0]["params"]], [id(p) for p in legacy_parameters])
+        torch.testing.assert_close(optimizer.state[adjacency]["exp_avg"], legacy.state[adjacency]["exp_avg"])
+        anchors = {name: p.detach().clone() for name, p in model.named_parameters() if not p.requires_grad}
+        optimizer.step()
+        for name, p in model.named_parameters():
+            if name in anchors:
+                torch.testing.assert_close(p, anchors[name], rtol=0, atol=0)
+
+    def test_phase3_to_phase4_load_preserves_all_weights_and_calibrated_cutoffs(self):
+        source = make_model(3)
+        with torch.no_grad():
+            source.cf_threshold.fill_(-.75)
+            source.cf_threshold_exp.fill_(.37)
+        source.eval()
+        x = torch.randn(2, 4, 32)
+        with torch.no_grad():
+            expected = source(x)
+        payload = {
+            "state_dict": source.state_dict(), "phase": 3, "fold": 2,
+            "dataset": "disfa", "au_ids": list(source.au_ids), "model": "ctrlau",
+            "num_emotions": 8, "epoch": 7, "best_f1": .665,
+            "graph_topology": "au_to_expression", "training_schema": TRAINING_SCHEMA,
+            "cf_mask_schema": CF_MASK_SCHEMA,
+        }
+        stream = io.BytesIO()
+        torch.save(payload, stream)
+        stream.seek(0)
+        target = make_model(4)
+        load_training_checkpoint(target, stream, phase=4, fold=2, dataset="disfa", model_name="ctrlau", device="cpu")
+        for name, tensor in source.state_dict().items():
+            torch.testing.assert_close(target.state_dict()[name], tensor, rtol=0, atol=0)
+        target.eval()
+        with torch.no_grad():
+            actual = target(x)
+        for name in ("graph_au_probs", "graph_emo_probs"):
+            torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
 
     def test_no_expression_to_au_message_or_refinement_dependency(self):
         model = make_model(2)
