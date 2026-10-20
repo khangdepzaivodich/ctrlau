@@ -201,6 +201,52 @@ class GraphPhaseTests(unittest.TestCase):
             if name in anchors:
                 torch.testing.assert_close(p, anchors[name], rtol=0, atol=0)
 
+    def test_phase4_frozen_bn_stats_keeps_affine_and_cnn_learning_across_epochs(self):
+        for dataset in ("disfa", "bp4d"):
+            with self.subTest(dataset=dataset):
+                model = make_model(4, dataset)
+                model.backbone = nn.Sequential(nn.Linear(32, 32), nn.BatchNorm1d(4))
+                weights = {name: getattr(model.cfg, name) for name in vars(ModelConfig) if name.startswith("lambda_")}
+                with contextlib.redirect_stdout(io.StringIO()):
+                    configure_training_phase(model, types.SimpleNamespace(
+                        phase=4, model="ctrlau", freeze_bn_stats=True))
+                for name, weight in weights.items():
+                    self.assertEqual(getattr(model.cfg, name), weight, name)
+                bn_modules = {name: module for name, module in model.named_modules()
+                              if isinstance(module, nn.modules.batchnorm._BatchNorm)}
+                stats = {name: {key: value.clone() for key, value in module.named_buffers()}
+                         for name, module in bn_modules.items()}
+                cnn_before = model.backbone[0].weight.detach().clone()
+                affine_before = model.au_head.extractors[0].bn1.weight.detach().clone()
+                optimizer = build_optimizer(model, lr=1e-5, weight_decay=model.cfg.weight_decay)
+                batches = [{"image": torch.randn(2, 4, 32),
+                            "au_labels": torch.randint(0, 2, (2, model.num_aus)).float()}]
+                for epoch in (1, 2):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        train_one_epoch(model, batches, optimizer, "cpu", epoch, cfg=model.cfg, init_lr=1e-5)
+                    self.assertTrue(model.training)
+                    self.assertTrue(model.global_linear.drop.training)
+                    self.assertTrue(model.au_head.training)
+                    for name, module in bn_modules.items():
+                        self.assertFalse(module.training, name)
+                        self.assertTrue(module.weight.requires_grad, name)
+                        self.assertTrue(module.bias.requires_grad, name)
+                        self.assertIsNotNone(module.weight.grad, name)
+                        self.assertTrue(torch.isfinite(module.weight.grad).all(), name)
+                        for key, value in module.named_buffers():
+                            torch.testing.assert_close(value, stats[name][key], rtol=0, atol=0)
+                self.assertGreater(model.backbone[0].weight.grad.abs().sum().item(), 0)
+                self.assertGreater(model.au_head.extractors[0].bn1.weight.grad.abs().sum().item(), 0)
+                self.assertFalse(torch.equal(model.backbone[0].weight, cnn_before))
+                self.assertFalse(torch.equal(model.au_head.extractors[0].bn1.weight, affine_before))
+
+    def test_frozen_bn_flag_rejects_other_phases_before_loading_data(self):
+        for phase in (1, 2, 3):
+            with self.subTest(phase=phase), patch("sys.argv", ["train.py", "--phase", str(phase), "--freeze-bn-stats"]):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as exc:
+                    main()
+                self.assertEqual(exc.exception.code, 2)
+
     def test_phase3_to_phase4_load_preserves_all_weights_and_calibrated_cutoffs(self):
         source = make_model(3)
         with torch.no_grad():

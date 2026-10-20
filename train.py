@@ -115,6 +115,10 @@ def load_training_checkpoint(model, path, *, phase, fold, dataset, model_name,
 
 def configure_training_phase(model, args):
     """Apply the CLI's phase-specific freezing and objective weights."""
+    freeze_bn_stats = bool(getattr(args, "freeze_bn_stats", False))
+    if freeze_bn_stats and args.phase != 4:
+        raise ValueError("--freeze-bn-stats is only supported in phase 4")
+    model.cfg.freeze_bn_stats = freeze_bn_stats
     model.set_phase(args.phase)
     if args.phase == 1:
         print("=== Phase 1: Feature Extraction ===")
@@ -210,6 +214,8 @@ def configure_training_phase(model, args):
             print("=== Phase 4: End-to-End Fine-Tuning ===")
             print("Training visual feature extractors and graphs with the phase-3 objective.")
             print("CLIP, semantic projections and phase-1-only classifiers stay frozen.")
+            if model.cfg.freeze_bn_stats:
+                print("BatchNorm running statistics frozen; BN affine parameters remain trainable.")
 
         # The objective is identical in phases 3/4; set_phase controls which
         # modules train. Never inherit different weights from config defaults
@@ -263,6 +269,12 @@ def keep_frozen_modules_eval(model):
         module = getattr(model, module_name, None)
         if module is not None:
             module.eval()
+    if phase == 4 and getattr(model.cfg, "freeze_bn_stats", False):
+        # Reapply after model.train() each epoch. eval() changes only BN's
+        # statistics behavior; it does not disable gradients on weight/bias.
+        for module in model.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                module.eval()
 
 
 def build_optimizer(model, lr, weight_decay):
@@ -522,11 +534,17 @@ def main():
         default=1.0,
         help="Semantic component attenuation in [0, 1] (default: 1.0; no overshoot)",
     )
+    parser.add_argument(
+        "--freeze-bn-stats", action="store_true",
+        help="Phase 4 only: preserve BatchNorm running statistics while training affine parameters",
+    )
     args = parser.parse_args()
     if args.lr is None:
         args.lr = {1: 1e-4, 2: 1e-4, 3: 2e-5, 4: 1e-5}[args.phase]
     if not isfinite(args.cf_scale) or not 0.0 <= args.cf_scale <= 1.0:
         parser.error("--cf-scale must be in [0, 1]; larger values amplify instead of attenuating")
+    if args.freeze_bn_stats and args.phase != 4:
+        parser.error("--freeze-bn-stats is only supported in phase 4")
     if args.phase >= 2 and not args.resume:
         parser.error("Phases 2/3/4 require --resume from the preceding phase or the same phase")
     if args.resume and not os.path.isfile(args.resume):
@@ -699,6 +717,7 @@ def main():
         checkpoint = {
             "training_schema": TRAINING_SCHEMA,
             "cf_mask_schema": CF_MASK_SCHEMA if args.phase >= 3 else None,
+            "freeze_bn_stats": args.freeze_bn_stats,
             "best_f1": best_f1,
             "f1": avg_f1,
             "state_dict": model.state_dict(),
