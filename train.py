@@ -622,14 +622,14 @@ def main():
             f"Please check that --data_root points to the official {args.dataset.upper()} layout."
         )
     
-    # DataLoader settings matching original repo (no drop_last)
+    # Load in the main process to bypass worker queues and expose image-read errors.
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.batch_size,
-        shuffle=True, num_workers=4, pin_memory=True,
+        shuffle=True, num_workers=0, pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=cfg.batch_size,
-        shuffle=False, num_workers=4, pin_memory=True,
+        shuffle=False, num_workers=0, pin_memory=True,
     )
     
     # Model
