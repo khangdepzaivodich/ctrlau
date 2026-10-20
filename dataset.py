@@ -307,7 +307,6 @@ class DISFADataset(Dataset):
     def __getitem__(self, idx):
         if self.mode == "list":
             rel_path, full_img_path = self.samples[idx]
-            print(f"[Opening image] {full_img_path}", flush=True)
             image = Image.open(full_img_path).convert("RGB")
             if self.transform:
                 image = self.transform(image)
@@ -319,7 +318,6 @@ class DISFADataset(Dataset):
             }
         else:
             subj, frame_num, img_path = self.samples[idx]
-            print(f"[Opening image] {img_path}", flush=True)
             image = Image.open(img_path).convert("RGB")
             if self.transform:
                 image = self.transform(image)
