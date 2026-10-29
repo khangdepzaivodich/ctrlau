@@ -465,6 +465,10 @@ def main():
         help="Benchmark protocol and AU vocabulary",
     )
     parser.add_argument(
+        "--stage-data-to", default=None,
+        help="Copy and verify --data_root into a NEW local directory before training (e.g. /content/DISFA_Data)",
+    )
+    parser.add_argument(
         "--resume",
         type=str,
         default="",
@@ -523,6 +527,10 @@ def main():
         help="Number of epochs (default: 20)",
     )
     parser.add_argument(
+        "--num_workers", "--num-workers", type=int, default=4,
+        help="DataLoader workers for training and validation (default: 4; 0 loads in the main process)",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=0,
@@ -539,6 +547,8 @@ def main():
         help="Phase 4 only: preserve BatchNorm running statistics while training affine parameters",
     )
     args = parser.parse_args()
+    if args.num_workers < 0:
+        parser.error("--num_workers must be non-negative")
     if args.lr is None:
         args.lr = {1: 1e-4, 2: 1e-4, 3: 2e-5, 4: 1e-5}[args.phase]
     if not isfinite(args.cf_scale) or not 0.0 <= args.cf_scale <= 1.0:
@@ -553,6 +563,9 @@ def main():
         raise ValueError("The copied legacy SymGraphAU wrapper supports phase 1 only; use CtrlAU for graph phases")
     if args.model == "symgraphau" and args.dataset != "disfa":
         raise ValueError("The copied legacy SymGraphAU wrapper is DISFA-only; use CtrlAU for BP4D")
+    if args.stage_data_to:
+        from stage_dataset import stage_dataset
+        args.data_root = stage_dataset(args.data_root, args.stage_data_to)
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -622,14 +635,14 @@ def main():
             f"Please check that --data_root points to the official {args.dataset.upper()} layout."
         )
     
-    # Load in the main process to bypass worker queues and expose image-read errors.
+    # Overlap image loading with model computation; allow 0 for diagnostics.
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.batch_size,
-        shuffle=True, num_workers=0, pin_memory=True,
+        shuffle=True, num_workers=args.num_workers, pin_memory=True,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=cfg.batch_size,
-        shuffle=False, num_workers=0, pin_memory=True,
+        shuffle=False, num_workers=args.num_workers, pin_memory=True,
     )
     
     # Model
