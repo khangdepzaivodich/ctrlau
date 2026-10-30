@@ -333,6 +333,39 @@ class CtrlAUModel(nn.Module):
         """
         return compute_expression_pseudo_labels(Y_a.float(), self.paper_au_expression_prior)
 
+    def refine_graph_predictions(self, au_logits, emotion_logits, k_values=(10,)):
+        """Snapshot the existing logit-refinement sequence at requested K values.
+
+        Only detached logit copies are optimized. Model weights and ground-truth
+        labels are not involved. K=0 returns direct graph probabilities.
+        """
+        k_values = tuple(sorted(set(k_values)))
+        if not k_values or any(type(k) is not int or k < 0 for k in k_values):
+            raise ValueError("K values must be non-negative integers")
+        au_reference, emotion_reference = au_logits.detach(), emotion_logits.detach()
+        direct_au = torch.sigmoid(au_reference)
+        results = {0: (direct_au, torch.sigmoid(emotion_reference))} if 0 in k_values else {}
+        if k_values[-1] == 0:
+            return results
+        # Fixed forward pseudo-targets: expression gradients never update AUs.
+        prior_targets = self.au_to_expr_pseudo((direct_au > 0.5).float())
+        with torch.enable_grad():
+            refined_au = au_reference.clone().requires_grad_(True)
+            refined_emotion = emotion_reference.clone().requires_grad_(True)
+            optimizer = torch.optim.Adam([refined_au, refined_emotion], lr=0.01)
+            for step in range(1, k_values[-1] + 1):
+                optimizer.zero_grad()
+                e_au = self.facs_au_violation_loss(torch.sigmoid(refined_au))
+                e_exp = self.expression_bce_loss(torch.sigmoid(refined_emotion), prior_targets)
+                e_prior = F.mse_loss(refined_au, au_reference) + F.mse_loss(refined_emotion, emotion_reference)
+                energy = 0.05 * (e_au + e_exp) + 1.0 * e_prior
+                energy.backward()
+                optimizer.step()
+                if step in k_values:
+                    results[step] = (torch.sigmoid(refined_au).detach(),
+                                     torch.sigmoid(refined_emotion).detach())
+        return results
+
     @torch.no_grad()
     def initialize_counterfactual_thresholds(self):
         """Start CF cutoffs at one times the factual per-target routing mean.
@@ -794,32 +827,9 @@ class CtrlAUModel(nn.Module):
         raw_graph_au_probs = graph_au_probs
         raw_graph_emo_probs = graph_emo_probs
         if not self.training and getattr(self.cfg, "enable_test_time_refinement", False):
-            # Fixed forward AU -> expression pseudo-targets. No expression
-            # reconstruction of AUs, and no gradient from this target into AUs.
-            prior_targets = self.au_to_expr_pseudo((graph_au_probs.detach() > 0.5).float())
-            with torch.enable_grad():
-                refined_au_logits = graph_au_logits.detach().clone().requires_grad_(True)
-                refined_emo_logits = graph_emo_logits.detach().clone().requires_grad_(True)
-                
-                optimizer = torch.optim.Adam([refined_au_logits, refined_emo_logits], lr=0.01)
-                
-                for _ in range(10):
-                    optimizer.zero_grad()
-                    p_au = torch.sigmoid(refined_au_logits)
-                    p_emo = torch.sigmoid(refined_emo_logits)
-                    
-                    e_au = self.facs_au_violation_loss(p_au)
-                    e_exp = self.expression_bce_loss(p_emo, prior_targets)
-                    # Strong prior anchor (1.0) so visual evidence is not overridden by rule suppression
-                    e_prior = F.mse_loss(refined_au_logits, graph_au_logits.detach()) + \
-                              F.mse_loss(refined_emo_logits, graph_emo_logits.detach())
-                              
-                    energy = 0.05 * (e_au + e_exp) + 1.0 * e_prior
-                    energy.backward()
-                    optimizer.step()
-                    
-                graph_au_probs = torch.sigmoid(refined_au_logits).detach()
-                graph_emo_probs = torch.sigmoid(refined_emo_logits).detach()
+            graph_au_probs, graph_emo_probs = self.refine_graph_predictions(
+                graph_au_logits, graph_emo_logits, (10,)
+            )[10]
 
         return {
             "au_embeddings": au_embeddings,
@@ -832,6 +842,8 @@ class CtrlAUModel(nn.Module):
             "emotion_pseudo": emotion_pseudo,
             "graph_au_probs": graph_au_probs,
             "graph_emo_probs": graph_emo_probs,
+            "graph_au_logits": graph_au_logits,
+            "graph_emo_logits": graph_emo_logits,
             "raw_graph_au_probs": raw_graph_au_probs,
             "raw_graph_emo_probs": raw_graph_emo_probs,
             "au_au_adj": au_au_adj,
